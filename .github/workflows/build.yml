@@ -34,7 +34,7 @@ jobs:
           sed -i '' '/AppIcon\.icon/d' location-spoofer.xcodeproj/project.pbxproj
           grep -c "AppIcon.icon" location-spoofer.xcodeproj/project.pbxproj || true
 
-      - name: Compilar sin firma
+      - name: Compilar sin firma (iOS 16)
         run: |
           xcodebuild build \
             -project location-spoofer.xcodeproj \
@@ -44,6 +44,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            IPHONEOS_DEPLOYMENT_TARGET=16.0 \
             ASSETCATALOG_COMPILER_APPICON_NAME="" > build.log 2>&1 || true
           echo "=========== RESUMEN DE ERRORES ==========="
           grep -E "error:|BUILD (FAILED|SUCCEEDED)" build.log | sort -u | cut -c1-400 | head -30
@@ -57,17 +58,33 @@ jobs:
           name: build-log
           path: build.log
 
-      - name: Mostrar estructura y entitlements
+      - name: Preparar Payload
         run: |
           mkdir Payload
           cp -R build/Build/Products/Release-iphoneos/*.app Payload/
-          find Payload -maxdepth 4
-          find . -name "*.entitlements" -not -path "./build/*" -exec sh -c 'echo "---- $1"; cat "$1"' _ {} \;
+          APP=Payload/location-spoofer.app
+          for P in "$APP/Info.plist" "$APP/PlugIns/location-spoofer-tunnel.appex/Info.plist"; do
+            /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 16.0" "$P" || true
+            echo "$P -> MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$P")"
+          done
+
+      - name: Firmar con entitlements (ldid)
+        run: |
+          brew install ldid
+          APP=Payload/location-spoofer.app
+          APPEX=$APP/PlugIns/location-spoofer-tunnel.appex
+          for F in "$APP"/Frameworks/*.dylib; do ldid -S "$F"; done
+          ldid -STunnel/location-spoofer-tunnel.entitlements "$APPEX/location-spoofer-tunnel"
+          ldid -SResources/location-spoofer.entitlements "$APP/location-spoofer"
+          echo "=== Entitlements de la app ==="
+          ldid -e "$APP/location-spoofer"
+          echo "=== Entitlements del tunel ==="
+          ldid -e "$APPEX/location-spoofer-tunnel"
 
       - name: Empaquetar
-        run: zip -qr app.ipa Payload
+        run: zip -qry app.ipa Payload
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ipa-sin-firmar
+          name: ipa-firmado
           path: app.ipa
