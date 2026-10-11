@@ -96,8 +96,7 @@ private final class SearchCompleterHelper: NSObject, ObservableObject, MKLocalSe
 }
 
 struct MapHomeView: View {
-    @State private var mapSelection: MapSelection<MKMapItem>?
-    @State private var cameraPosition: MapCameraPosition = .region(
+    @State private var cameraPosition: CameraPos = .region(
         MKCoordinateRegion(
             center: CLLocationCoordinate2D(latitude: 39.9042, longitude: 116.4074),
             span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
@@ -130,27 +129,14 @@ struct MapHomeView: View {
     var body: some View {
         ZStack {
             // 全屏地图
-            MapReader { proxy in
-                Map(position: $cameraPosition, selection: $mapSelection) {
-                    if let coord = selectedCoordinate {
-                        Marker("Target Location", coordinate: coord)
-                            .tint(.red)
-                    }
-                    UserAnnotation()
+            LegacyMapView(
+                camera: cameraPosition,
+                markerCoordinate: selectedCoordinate,
+                onTap: { coordinate in
+                    selectCoordinate(coordinate)
                 }
-                .mapStyle(.standard(pointsOfInterest: .all))
-                .mapFeatureSelectionAccessory(.automatic)
-                .ignoresSafeArea()
-                .onTapGesture(coordinateSpace: .global) { tapLocation in
-                    // 空白点击才取坐标(POI 内置选中由 selection 绑定处理)
-                    if let coordinate = proxy.convert(tapLocation, from: .global) {
-                        selectCoordinate(coordinate)
-                    }
-                }
-                .onChange(of: mapSelection) { _, newSelection in
-                    handleMapSelection(newSelection)
-                }
-            }
+            )
+            .ignoresSafeArea()
 
             // 底部叠层:右下角"回到我的位置"按钮 + 底部卡片
             VStack(spacing: 0) {
@@ -367,7 +353,7 @@ struct MapHomeView: View {
                     .textFieldStyle(.plain)
                     .submitLabel(.search)
                     .onSubmit { performSearch() }
-                    .onChange(of: searchText) { _, new in searchCompleter.updateQuery(new) }
+                    .onChange(of: searchText) { new in searchCompleter.updateQuery(new) }
                 if !searchText.isEmpty {
                     Button(action: { searchText = "" }) {
                         Image(systemName: "xmark.circle.fill")
@@ -610,31 +596,6 @@ struct MapHomeView: View {
                 DispatchQueue.main.async {
                     self.selectedLocationName = name.isEmpty ? "Unknown location" : name
                 }
-            }
-        }
-    }
-
-    private func handleMapSelection(_ selection: MapSelection<MKMapItem>?) {
-        guard let selection else { return }
-
-        // 自定义 Marker 走 .value;POI 走 .feature
-        if let mapItem = selection.value {
-            applyMapItem(mapItem)
-            return
-        }
-        guard let feature = selection.feature else { return }
-
-        // POI:用 MKMapItemRequest 异步换成 MKMapItem,取 name + coordinate
-        Task { @MainActor in
-            do {
-                let mapItem = try await MKMapItemRequest(feature: feature).mapItem
-                applyMapItem(mapItem)
-            } catch {
-                // 兜底:直接用 feature 自带字段
-                applySelectedLocation(
-                    name: feature.title ?? "Unknown place",
-                    coordinate: feature.coordinate
-                )
             }
         }
     }

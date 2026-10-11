@@ -18,10 +18,10 @@ struct CoordinateInputView: View {
     var onLocationConfirmed: (() -> Void)? = nil
     @State private var locationConfig = LocationConfiguration.shared
     @State private var searchText = ""
-    @State private var region = MKCoordinateRegion(
+    @State private var camera: CameraPos = .region(MKCoordinateRegion(
         center: CLLocationCoordinate2D(latitude: 39.9042, longitude: 116.4074),
         span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)
-    )
+    ))
     @State private var pin: CLLocationCoordinate2D? = nil
     @State private var selectedName = ""
     @State private var showingConfirm = false
@@ -54,19 +54,13 @@ struct CoordinateInputView: View {
                     .background(Color(UIColor.secondarySystemBackground))
                     .cornerRadius(10)
 
-                    MapReader { proxy in
-                        Map(position: .constant(.region(region))) {
-                            if let pin = pin {
-                                Marker("Target Location", coordinate: pin)
-                                    .tint(.red)
-                            }
+                    LegacyMapView(
+                        camera: camera,
+                        markerCoordinate: pin,
+                        onTap: { coordinate in
+                            selectLocation(coordinate: coordinate, name: nil)
                         }
-                        .onTapGesture { position in
-                            if let coordinate = proxy.convert(position, from: .local) {
-                                selectLocation(coordinate: coordinate, name: nil)
-                            }
-                        }
-                    }
+                    )
                     .frame(height: 280)
                     .cornerRadius(12)
 
@@ -182,7 +176,7 @@ struct CoordinateInputView: View {
 
     private func selectLocation(coordinate: CLLocationCoordinate2D, name: String?) {
         pin = coordinate
-        region.center = coordinate
+        camera = .region(MKCoordinateRegion(center: coordinate, span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)))
         if let name = name {
             selectedName = name
             showingConfirm = true
@@ -255,7 +249,7 @@ struct CoordinateInputView: View {
         currentLocationName = UserDefaults.standard.string(forKey: "currentLocationName")
         if let coords = locationConfig.currentCoordinates {
             pin = CLLocationCoordinate2D(latitude: coords.latitude, longitude: coords.longitude)
-            region.center = pin!
+            camera = .region(MKCoordinateRegion(center: pin!, span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05)))
         }
     }
 }
