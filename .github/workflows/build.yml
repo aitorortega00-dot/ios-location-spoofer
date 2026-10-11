@@ -23,8 +23,8 @@ jobs:
           cd GoSpoofer
           chmod +x make.sh
           ./make.sh
-          
-        - name: Quitar AppIcon.icon (falla en CI)
+
+      - name: Quitar AppIcon.icon (falla en CI)
         run: |
           sed -i '' '/AppIcon\.icon/d' location-spoofer.xcodeproj/project.pbxproj
           grep -c "AppIcon.icon" location-spoofer.xcodeproj/project.pbxproj || true
