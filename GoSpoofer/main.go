@@ -77,6 +77,18 @@ func noteConnect(host string, isLoc bool) {
 	}
 }
 
+// DIAG: goproxy escribe aqui sus avisos (por ejemplo "Cannot handshake client ..."),
+// que es donde aparece el motivo exacto si el cliente rechaza el certificado.
+type goproxyLogWriter struct{}
+
+func (goproxyLogWriter) Write(p []byte) (int, error) {
+	s := strings.TrimSpace(string(p))
+	if s != "" {
+		logEvent("goproxy: " + s)
+	}
+	return len(p), nil
+}
+
 //export golocationspoofer_drainlogs
 func golocationspoofer_drainlogs() *C.char {
 	logBufferMu.Lock()
@@ -150,6 +162,7 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 
 	proxy := goproxy.NewProxyHttpServer()
 	proxy.Verbose = false
+	proxy.Logger = log.New(goproxyLogWriter{}, "", 0)
 
 	if globalCACert != nil {
 		setupMITM(proxy, globalCACert)
