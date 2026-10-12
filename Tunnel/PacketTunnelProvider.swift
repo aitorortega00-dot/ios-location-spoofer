@@ -15,6 +15,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let configuration = LocationConfiguration.shared
 
     // Go location spoofer proxy integration
+    private var goLocationSpoofer: GoLocationSpoofer?
     private var logTimer: DispatchSourceTimer?
 
     override func startTunnel(
