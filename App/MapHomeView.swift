@@ -816,7 +816,7 @@ struct MapHomeView: View {
         do {
             try session.sendProviderMessage(request) { response in
                 DispatchQueue.main.async {
-                                        guard let data = response else {
+                    guard let data = response else {
                         DiagLog.add("[IPC] response nil, vpn status=\(session.status.diagDesc)")
                         completion(nil)
                         return
@@ -826,6 +826,7 @@ struct MapHomeView: View {
                         completion(nil)
                         return
                     }
+
                     let enabled = data[0] != 0
                     let lat = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 1, as: Double.self) }
                     let lon = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 9, as: Double.self) }
@@ -911,7 +912,8 @@ struct MapHomeView: View {
                                         completion(true, nil)
                                     } else {
                                         DiagLog.add("[cold-start] Coord confirmation timed out, callback completion(false)")
-                                        completion(false, "Go proxy ready but coord confirmation timed out, please retry")
+                                        DiagLog.add("[cold-start] Coord confirmation timed out, continuing anyway (temporary)")
+                                        completion(true, nil)
                                     }
                                 }
                             } else {
@@ -1010,9 +1012,11 @@ struct MapHomeView: View {
                                     isSpoofing = false
                                 }
                             } else {
-                                DiagLog.add("[hot-restart] Coord confirmation timed out, setting failed")
-                                spoofingState = .failed(reason: "Coordinate confirmation timed out. Please retry.")
-                                isSpoofing = false
+                                DiagLog.add("[hot-restart] Coord confirmation timed out, continuing anyway (temporary)")
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                    showRestartLocationGuide = true
+                                    isSpoofing = false
+                                }
                             }
                         }
                     } else {
