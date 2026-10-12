@@ -15,7 +15,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private let configuration = LocationConfiguration.shared
 
     // Go location spoofer proxy integration
-    private var goLocationSpoofer: GoLocationSpoofer?
+    private var logTimer: DispatchSourceTimer?
 
     override func startTunnel(
         options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void
@@ -45,9 +45,25 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
 
         os_log("Go proxy started successfully", log: OSLog.default, type: .info)
+        os_log("SPOOFTRACE started lat=%{public}f lon=%{public}f mode=%{public}@", log: OSLog.default, type: .default, lat ?? 0, lon ?? 0, (lat != nil && lon != nil) ? "SPOOFING" : "TRANSPARENT")
+        startLogPump()
         startTunnelWithProxy(completionHandler: completionHandler)
     }
 
+    private func startLogPump() {
+        logTimer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        t.schedule(deadline: .now() + 1, repeating: 2)
+        t.setEventHandler { [weak self] in
+            let running = (self?.goLocationSpoofer?.isRunning() ?? false) ? 1 : 0
+            os_log("SPOOFTRACE tick running=%{public}d", log: OSLog.default, type: .default, running)
+            if let logs = self?.goLocationSpoofer?.drainGoLogs() {
+                os_log("SPOOFTRACE go: %{public}@", log: OSLog.default, type: .default, logs)
+            }
+        }
+        t.resume()
+        logTimer = t
+    }
     private func startTunnelWithProxy(completionHandler: @escaping (Error?) -> Void) {
         let tunnelSettings = createTunnelSettings(proxyHost: proxyHost, proxyPort: proxyPort)
 
