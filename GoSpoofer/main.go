@@ -531,9 +531,11 @@ func rewriteWifiDevice(wd []byte, lat, lon int64) ([]byte, int) {
 		loc = protowire.AppendVarint(loc, uint64(lat))
 		loc = protowire.AppendTag(loc, 2, protowire.VarintType)
 		loc = protowire.AppendVarint(loc, uint64(lon))
+		loc = protowire.AppendTag(loc, 3, protowire.VarintType)
+  		loc = protowire.AppendVarint(loc, 30)
 		out = protowire.AppendTag(out, 2, protowire.BytesType)
 		out = protowire.AppendBytes(out, loc)
-		modified += 2
+		modified += 3
 	}
 	return out, modified
 }
