@@ -816,7 +816,13 @@ struct MapHomeView: View {
         do {
             try session.sendProviderMessage(request) { response in
                 DispatchQueue.main.async {
-                    guard let data = response, data.count == 17 else {
+                                        guard let data = response else {
+                        DiagLog.add("[IPC] response nil, vpn status=\(session.status.diagDesc)")
+                        completion(nil)
+                        return
+                    }
+                    guard data.count == 17 else {
+                        DiagLog.add("[IPC] unexpected response size: \(data.count)")
                         completion(nil)
                         return
                     }
