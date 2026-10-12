@@ -136,7 +136,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // App 端按相同格式解;两端都在 iOS arm64 上,统一小端无跨架构问题。
             guard let proxy = goLocationSpoofer,
                   let coords = proxy.getCurrentCoords() else {
-                handler(nil)
+                let why = goLocationSpoofer == nil ? "no-spoofer-object" : "proxy-handle-nil running=\(goLocationSpoofer!.isRunning())"
+                handler(Data("ERR:\(why)".utf8))
                 return
             }
             var resp = Data()
