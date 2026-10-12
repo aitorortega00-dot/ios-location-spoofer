@@ -59,7 +59,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             let running = (self?.goLocationSpoofer?.isRunning() ?? false) ? 1 : 0
             os_log("SPOOFTRACE tick running=%{public}d", log: OSLog.default, type: .default, running)
             if let logs = self?.goLocationSpoofer?.drainGoLogs() {
-                os_log("SPOOFTRACE go: %{public}@", log: OSLog.default, type: .default, logs)
+                // Una linea de log por mensaje, cada una con prefijo SPOOFTRACE,
+                // para que el filtro de 3uTools no oculte las lineas posteriores a un salto de linea.
+                for line in logs.split(separator: "\n") {
+                    os_log("SPOOFTRACE go: %{public}@", log: OSLog.default, type: .default, String(line))
+                }
             }
         }
         t.resume()
