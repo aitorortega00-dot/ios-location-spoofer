@@ -44,6 +44,10 @@ const maxLogEntries = 200
 var logBuffer = make([]string, 0, maxLogEntries)
 var logBufferMu sync.Mutex
 
+// DIAG: hosts ya vistos en CONNECT (para loguear cada host nuevo una sola vez)
+var seenHosts = map[string]bool{}
+var seenHostsMu sync.Mutex
+
 func logEvent(msg string) {
 	stamp := time.Now().Format("15:04:05.000")
 	line := stamp + "  " + msg
@@ -55,6 +59,22 @@ func logEvent(msg string) {
 	logBufferMu.Unlock()
 	// 同步写一份到 stderr(开发环境 Mac+Console.app 可见),保留原日志通路
 	log.Printf("%s", msg)
+}
+
+// DIAG: registra cada CONNECT que llega al proxy.
+// Los hosts de localizacion se loguean siempre; el resto, solo la primera vez.
+func noteConnect(host string, isLoc bool) {
+	seenHostsMu.Lock()
+	first := !seenHosts[host]
+	if first && len(seenHosts) < 500 {
+		seenHosts[host] = true
+	}
+	seenHostsMu.Unlock()
+	if isLoc {
+		logEvent("CONNECT loc host=" + host)
+	} else if first {
+		logEvent("CONNECT new host=" + host)
+	}
 }
 
 //export golocationspoofer_drainlogs
@@ -157,7 +177,7 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 		}
 	}()
 
-	log.Printf("Proxy server started on 127.0.0.1:8888")
+	logEvent(fmt.Sprintf("Proxy started on 127.0.0.1:8888 mitm=%v spoofing=%v lat=%.6f lon=%.6f", globalCACert != nil, spoofingEnabled, spoofLat, spoofLon))
 	return C.uintptr_t(h)
 }
 
@@ -197,9 +217,11 @@ func setupMITM(proxy *goproxy.ProxyHttpServer, cert *tls.Certificate) {
 	}
 
 	var customMitmHandler goproxy.FuncHttpsHandler = func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		hostname := strings.Split(host, ":")[0]
-		if hostname == "gs-loc.apple.com" || hostname == "gs-loc-cn.apple.com" {
-			log.Printf("Intercepting location request: %s", host)
+		hostname := strings.ToLower(strings.Split(host, ":")[0])
+		isLoc := hostname == "gs-loc.apple.com" || hostname == "gs-loc-cn.apple.com"
+		noteConnect(host, isLoc)
+		if isLoc {
+			logEvent(fmt.Sprintf("Intercepting location request: %s", host))
 			return customCaMitm, host
 		}
 		return goproxy.OkConnect, host
@@ -261,7 +283,14 @@ a{color:#007AFF;text-decoration:none}
 
 func setupLocationSpoofing(proxy *goproxy.ProxyHttpServer) {
 	proxy.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		if req.Host == "gs-loc.apple.com" || req.Host == "gs-loc-cn.apple.com" {
+		// DIAG: normaliza el host (quita puerto, minusculas) para no fallar por ":443"
+		h := strings.ToLower(strings.Split(req.Host, ":")[0])
+		if h == "" && req.URL != nil {
+			h = strings.ToLower(req.URL.Hostname())
+		}
+		if h == "gs-loc.apple.com" || h == "gs-loc-cn.apple.com" {
+			// DIAG: loguea cualquier peticion a estos hosts, aunque no sea /clls/wloc
+			logEvent(fmt.Sprintf("Request to loc host: %s %s%s", req.Method, req.Host, req.URL.Path))
 			if req.URL.Path == "/clls/wloc" && req.Method == "POST" {
 				return handleLocationRequest(req)
 			}
@@ -551,4 +580,3 @@ func rewriteLocation(loc []byte, lat, lon int64) ([]byte, int) {
 	}
 	return out, modified
 }
-
