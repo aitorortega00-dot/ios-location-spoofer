@@ -233,6 +233,12 @@ func setupMITM(proxy *goproxy.ProxyHttpServer, cert *tls.Certificate) {
 		hostname := strings.ToLower(strings.Split(host, ":")[0])
 		isLoc := hostname == "gs-loc.apple.com" || hostname == "gs-loc-cn.apple.com"
 		noteConnect(host, isLoc)
+		// Bloquea las descargas de datos de localizacion (teselas Wi-Fi) que traen
+		// posiciones reales de APs y saltan el spoof de gs-loc.
+		if strings.HasPrefix(hostname, "gspe") && strings.HasSuffix(hostname, "-ssl.ls.apple.com") {
+			logEvent("BLOCKED location data host=" + host)
+			return goproxy.RejectConnect, host
+		}
 		if isLoc {
 			logEvent(fmt.Sprintf("Intercepting location request: %s", host))
 			return customCaMitm, host
