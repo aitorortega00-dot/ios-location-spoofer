@@ -136,12 +136,28 @@ final class JoystickController: ObservableObject {
         DiagLog.add(String(format: "[Joystick] step %d N=%.2fm E=%.2fm (%.1fm) (%.7f, %.7f) → (%.7f, %.7f)",
                            n, north, east, distance, current.latitude, current.longitude, target.lat, target.lon))
 
-        // 1) Hot update in the tunnel
-        let reply = await sendMessage(String(format: "setCoords:%.8f,%.8f", target.lat, target.lon))
-        guard let reply, reply == Data("OK".utf8) else {
-            let why = reply.flatMap { String(data: $0, encoding: .utf8) } ?? "no response"
-            DiagLog.add("[Joystick] step \(n) setCoords failed: \(why)")
-            fail("Tunnel did not accept the move (\(why)). Is the VPN connected?")
+        // 1) Hot update in the tunnel. If the tunnel process does not answer (typically right after
+        //    installing a new build: iOS killed it but the VPN still reads "connected"), restart the
+        //    tunnel once and retry.
+        let command = String(format: "setCoords:%.8f,%.8f", target.lat, target.lon)
+        var result = await sendMessage(command)
+        if case .failure(let err) = result, err.isRecoverableByRestart {
+            DiagLog.add("[Joystick] step \(n) setCoords: \(err.text) — restarting tunnel and retrying once")
+            statusText = "Tunnel not answering — restarting it…"
+            if await restartTunnel() {
+                result = await sendMessage(command)
+            }
+        }
+        switch result {
+        case .success(let reply) where reply == "OK":
+            break
+        case .success(let reply):
+            DiagLog.add("[Joystick] step \(n) setCoords rejected by tunnel: \(reply)")
+            fail("Tunnel rejected the move: \(reply)")
+            return false
+        case .failure(let err):
+            DiagLog.add("[Joystick] step \(n) setCoords failed: \(err.text)")
+            fail("Move failed: \(err.text)")
             return false
         }
         // Keep the app-side copy in sync (the tunnel already wrote it; this just refreshes the cache).
@@ -180,26 +196,119 @@ final class JoystickController: ObservableObject {
 
     // MARK: - IPC
 
-    private func sendMessage(_ text: String) async -> Data? {
-        guard let session = ContentView.vpnManager?.connection as? NETunnelProviderSession else {
-            DiagLog.add("[Joystick] IPC session unavailable")
-            return nil
+    struct IPCError: Error {
+        let text: String
+        /// The tunnel process is gone or silent: a stop/start of the tunnel usually fixes it.
+        let isRecoverableByRestart: Bool
+    }
+
+    /// Returns the tunnel's reply as text, or a precise reason why there is none.
+    private func sendMessage(_ text: String) async -> Result<String, IPCError> {
+        switch await sendRaw(text) {
+        case .success(let data):
+            return .success(String(data: data, encoding: .utf8) ?? "<\(data.count) bytes>")
+        case .failure(let e):
+            return .failure(e)
         }
-        return await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
+    }
+
+    private func sendRaw(_ text: String) async -> Result<Data, IPCError> {
+        guard let manager = await loadManager() else {
+            return .failure(IPCError(text: "no VPN configuration found", isRecoverableByRestart: false))
+        }
+        guard let session = manager.connection as? NETunnelProviderSession else {
+            return .failure(IPCError(text: "VPN connection is not a tunnel session", isRecoverableByRestart: false))
+        }
+        let status = session.status
+        guard status == .connected else {
+            return .failure(IPCError(text: "VPN status is \(Self.describe(status)), not connected", isRecoverableByRestart: true))
+        }
+        return await withCheckedContinuation { (cont: CheckedContinuation<Result<Data, IPCError>, Never>) in
             do {
                 try session.sendProviderMessage(Data(text.utf8)) { response in
-                    cont.resume(returning: response)
+                    if let response {
+                        cont.resume(returning: .success(response))
+                    } else {
+                        cont.resume(returning: .failure(IPCError(
+                            text: "tunnel process did not answer (VPN shows connected)", isRecoverableByRestart: true)))
+                    }
                 }
             } catch {
-                DiagLog.add("[Joystick] sendProviderMessage error: \(error.localizedDescription)")
-                cont.resume(returning: nil)
+                cont.resume(returning: .failure(IPCError(
+                    text: "iOS refused the message: \(error.localizedDescription)", isRecoverableByRestart: true)))
             }
+        }
+    }
+
+    /// Uses the manager loaded at launch, or loads it now if it is missing.
+    private func loadManager() async -> NETunnelProviderManager? {
+        if let m = ContentView.vpnManager { return m }
+        DiagLog.add("[Joystick] vpnManager nil — loading from preferences")
+        return await withCheckedContinuation { (cont: CheckedContinuation<NETunnelProviderManager?, Never>) in
+            NETunnelProviderManager.loadAllFromPreferences { managers, _ in
+                DispatchQueue.main.async {
+                    if let m = managers?.first { ContentView.vpnManager = m }
+                    cont.resume(returning: managers?.first)
+                }
+            }
+        }
+    }
+
+    /// Stops and starts the tunnel, then waits for the Go proxy to answer getCoords.
+    private func restartTunnel() async -> Bool {
+        guard let manager = await loadManager() else { return false }
+        let started = Date()
+        let conn = manager.connection
+        if conn.status != .disconnected && conn.status != .invalid {
+            conn.stopVPNTunnel()
+            _ = await waitForStatus(conn, .disconnected, timeout: 8)
+        }
+        do {
+            try conn.startVPNTunnel()
+        } catch {
+            DiagLog.add("[Joystick] restartTunnel startVPNTunnel error: \(error.localizedDescription)")
+            return false
+        }
+        guard await waitForStatus(conn, .connected, timeout: 15) else {
+            DiagLog.add("[Joystick] restartTunnel: never reached connected (status \(Self.describe(conn.status)))")
+            return false
+        }
+        // .connected does not mean the Go proxy is listening yet: poll it.
+        for _ in 0..<20 {
+            if await readGoCoords() != nil {
+                DiagLog.add(String(format: "[Joystick] restartTunnel OK in %.1fs", Date().timeIntervalSince(started)))
+                return true
+            }
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+        DiagLog.add("[Joystick] restartTunnel: proxy never answered getCoords")
+        return false
+    }
+
+    private func waitForStatus(_ conn: NEVPNConnection, _ target: NEVPNStatus, timeout: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if conn.status == target { return true }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return conn.status == target
+    }
+
+    private static func describe(_ s: NEVPNStatus) -> String {
+        switch s {
+        case .invalid: return "invalid"
+        case .disconnected: return "disconnected"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .reasserting: return "reasserting"
+        case .disconnecting: return "disconnecting"
+        @unknown default: return "unknown(\(s.rawValue))"
         }
     }
 
     /// Same 17-byte "getCoords" protocol used by MapHomeView: 1 byte enabled + lat + lon (LE Double).
     private func readGoCoords() async -> (lat: Double, lon: Double)? {
-        guard let data = await sendMessage("getCoords"), data.count == 17 else { return nil }
+        guard case .success(let data) = await sendRaw("getCoords"), data.count == 17 else { return nil }
         let lat = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 1, as: Double.self) }
         let lon = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 9, as: Double.self) }
         return (lat, lon)
