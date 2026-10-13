@@ -62,10 +62,11 @@ enum JoystickGeo {
 
 @MainActor
 final class JoystickController: ObservableObject {
-    static let stepOptions: [Double] = [1, 5, 10, 25]
+    static let stepOptions: [Double] = [1, 2, 5, 10, 25, 50]
     static let offSecondsOptions: [Double] = [0.5, 1, 1.5, 2, 3]
     private static let stepKey = "joystickStepMeters"
     private static let offKey = "joystickOffSeconds"
+    private static let followKey = "joystickFollowMap"
 
     @Published var stepMeters: Double {
         didSet { UserDefaults.standard.set(stepMeters, forKey: Self.stepKey) }
@@ -73,6 +74,10 @@ final class JoystickController: ObservableObject {
     /// How long Location Services stays off on each step. 3 s = same as the normal flow.
     @Published var offSeconds: Double {
         didSet { UserDefaults.standard.set(offSeconds, forKey: Self.offKey) }
+    }
+    /// Pan the map to each new position (zoom is never changed).
+    @Published var followMap: Bool {
+        didSet { UserDefaults.standard.set(followMap, forKey: Self.followKey) }
     }
     @Published private(set) var isBusy = false
     @Published private(set) var statusText = "Ready"
@@ -91,6 +96,14 @@ final class JoystickController: ObservableObject {
         stepMeters = Self.stepOptions.contains(step) ? step : 5
         let off = d.double(forKey: Self.offKey)
         offSeconds = Self.offSecondsOptions.contains(off) ? off : 3
+        followMap = d.object(forKey: Self.followKey) as? Bool ?? true
+    }
+
+    /// Quick step change from the pad's centre button.
+    func cycleStep() {
+        let opts = Self.stepOptions
+        let i = opts.firstIndex(of: stepMeters) ?? 0
+        stepMeters = opts[(i + 1) % opts.count]
     }
 
     var hasPending: Bool { abs(pendingNorth) > 0.001 || abs(pendingEast) > 0.001 }
@@ -328,11 +341,14 @@ final class JoystickController: ObservableObject {
 
 }
 
-/// Compact on-map panel: 8-direction pad, step size and Location Services off time.
+/// Compact on-map pad. Centre button cycles the step; the gear opens the settings sheet.
 struct JoystickPanel: View {
     @ObservedObject var controller: JoystickController
     var onClose: () -> Void
+    @State private var showSettings = false
 
+    private let size: CGFloat = 38
+    private let gap: CGFloat = 4
     private let grid: [[JoystickDirection?]] = [
         [.nw, .n, .ne],
         [.w, nil, .e],
@@ -340,87 +356,138 @@ struct JoystickPanel: View {
     ]
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack {
-                Label("Joystick", systemImage: "dpad")
-                    .font(.subheadline).fontWeight(.semibold)
-                Spacer()
-                Button(action: onClose) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(.secondary)
+        VStack(spacing: 6) {
+            HStack(spacing: 10) {
+                if controller.isBusy {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "dpad").font(.caption).foregroundColor(.secondary)
                 }
+                Spacer(minLength: 0)
+                Button { showSettings = true } label: {
+                    Image(systemName: "gearshape.fill").font(.footnote)
+                }
+                .accessibilityLabel("Joystick settings")
+                Button(action: onClose) {
+                    Image(systemName: "xmark").font(.footnote.weight(.semibold))
+                }
+                .foregroundColor(.secondary)
                 .accessibilityLabel("Close joystick")
             }
 
-            VStack(spacing: 6) {
+            VStack(spacing: gap) {
                 ForEach(0..<3, id: \.self) { row in
-                    HStack(spacing: 6) {
+                    HStack(spacing: gap) {
                         ForEach(0..<3, id: \.self) { col in
                             if let dir = grid[row][col] {
                                 Button { controller.nudge(dir) } label: {
                                     Image(systemName: dir.arrowSymbol)
-                                        .font(.title3.weight(.semibold))
-                                        .frame(width: 52, height: 52)
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .frame(width: size, height: size)
                                         .background(Color.blue.opacity(0.15))
                                         .foregroundColor(.blue)
-                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                                        .clipShape(RoundedRectangle(cornerRadius: 9))
                                 }
                                 .accessibilityLabel("Move \(dir.rawValue)")
                             } else {
-                                centerCell
+                                centerButton
                             }
                         }
                     }
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Step").font(.caption).foregroundColor(.secondary)
-                Picker("Step", selection: $controller.stepMeters) {
-                    ForEach(JoystickController.stepOptions, id: \.self) { m in
-                        Text("\(Int(m)) m").tag(m)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Location Services off time").font(.caption).foregroundColor(.secondary)
-                Picker("Off time", selection: $controller.offSeconds) {
-                    ForEach(JoystickController.offSecondsOptions, id: \.self) { s in
-                        Text(s == s.rounded() ? "\(Int(s)) s" : String(format: "%.1f s", s)).tag(s)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
-
-            HStack(alignment: .top, spacing: 6) {
-                if controller.isBusy { ProgressView().controlSize(.small) }
-                Text(controller.statusText)
-                    .font(.caption)
-                    .foregroundColor(controller.statusIsError ? .red : .secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-            }
+            Text(controller.statusText)
+                .font(.system(size: 10))
+                .foregroundColor(controller.statusIsError ? .red : .secondary)
+                .lineLimit(2)
+                .frame(width: size * 3 + gap * 2, alignment: .leading)
         }
-        .padding(14)
-        .frame(width: 260)
+        .padding(8)
         .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-        .shadow(radius: 4)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .shadow(radius: 3)
+        .sheet(isPresented: $showSettings) {
+            JoystickSettingsView(controller: controller)
+                .presentationDetents([.medium])
+        }
     }
 
-    /// Centre of the pad: shows the queued distance while a step is running.
-    private var centerCell: some View {
+    /// Centre: current step (tap to change); shows the queued distance while a step runs.
+    private var centerButton: some View {
         let queued = (controller.pendingNorth * controller.pendingNorth + controller.pendingEast * controller.pendingEast).squareRoot()
-        return VStack(spacing: 0) {
-            if controller.hasPending {
-                Text(String(format: "+%.0f m", queued)).font(.caption2.weight(.semibold))
-                Text("queued").font(.system(size: 9)).foregroundColor(.secondary)
-            } else {
-                Image(systemName: "circle.fill").font(.system(size: 8)).foregroundColor(.secondary)
+        return Button { controller.cycleStep() } label: {
+            VStack(spacing: 0) {
+                if controller.hasPending {
+                    Text(String(format: "+%.0f", queued)).font(.system(size: 12, weight: .bold))
+                    Text("queued").font(.system(size: 8)).foregroundColor(.secondary)
+                } else {
+                    Text("\(Int(controller.stepMeters))").font(.system(size: 14, weight: .bold))
+                    Text("m").font(.system(size: 9)).foregroundColor(.secondary)
+                }
+            }
+            .frame(width: size, height: size)
+            .background(Color.secondary.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .foregroundColor(.primary)
+        .accessibilityLabel("Step \(Int(controller.stepMeters)) metres, tap to change")
+    }
+}
+
+/// Joystick parameters.
+struct JoystickSettingsView: View {
+    @ObservedObject var controller: JoystickController
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Step", selection: $controller.stepMeters) {
+                        ForEach(JoystickController.stepOptions, id: \.self) { m in
+                            Text("\(Int(m)) m").tag(m)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                } header: {
+                    Text("Step per tap")
+                } footer: {
+                    Text("Also changed by tapping the centre of the pad.")
+                }
+
+                Section {
+                    Picker("Off time", selection: $controller.offSeconds) {
+                        ForEach(JoystickController.offSecondsOptions, id: \.self) { s in
+                            Text(s == s.rounded() ? "\(Int(s)) s" : String(format: "%.1f s", s)).tag(s)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                } header: {
+                    Text("Location Services off time")
+                } footer: {
+                    Text("How long Location Services stays off on each step. Shorter is faster; 3 s matches the normal flow.")
+                }
+
+                Section {
+                    Toggle("Follow position on map", isOn: $controller.followMap)
+                } footer: {
+                    Text("Pans the map to each new position. The zoom level is never changed.")
+                }
+
+                Section("Last result") {
+                    Text(controller.statusText)
+                        .font(.footnote)
+                        .foregroundColor(controller.statusIsError ? .red : .secondary)
+                }
+            }
+            .navigationTitle("Joystick")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
         }
-        .frame(width: 52, height: 52)
     }
 }

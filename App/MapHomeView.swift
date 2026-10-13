@@ -240,11 +240,9 @@ struct MapHomeView: View {
                 joystickMarker = display
                 spoofedDisplayCoord = display
                 lastKnownUserCoord = display
-                withAnimation {
-                    cameraPosition = .region(MKCoordinateRegion(
-                        center: display,
-                        span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
-                    ))
+                // Keep the user's zoom: only pan, and only if "Follow position" is on.
+                if joystick.followMap {
+                    cameraPosition = .center(display)
                 }
             }
             refreshVPNStatus()

@@ -7,14 +7,23 @@ import MapKit
 struct CameraPos: Equatable {
     let id: UUID
     var region: MKCoordinateRegion
+    /// true = only move the centre and keep the user's current zoom (joystick follow).
+    var centerOnly: Bool = false
 
-    init(region: MKCoordinateRegion) {
+    init(region: MKCoordinateRegion, centerOnly: Bool = false) {
         self.id = UUID()
         self.region = region
+        self.centerOnly = centerOnly
     }
 
     static func region(_ region: MKCoordinateRegion) -> CameraPos {
         CameraPos(region: region)
+    }
+
+    /// Pans the map to `coordinate` without changing the zoom level.
+    static func center(_ coordinate: CLLocationCoordinate2D) -> CameraPos {
+        CameraPos(region: MKCoordinateRegion(center: coordinate, span: MKCoordinateSpan(latitudeDelta: 0, longitudeDelta: 0)),
+                  centerOnly: true)
     }
 
     static func == (lhs: CameraPos, rhs: CameraPos) -> Bool {
@@ -64,7 +73,11 @@ struct LegacyMapView: UIViewRepresentable {
 
         if context.coordinator.lastCameraID != camera.id {
             context.coordinator.lastCameraID = camera.id
-            map.setRegion(camera.region, animated: true)
+            if camera.centerOnly {
+                map.setCenter(camera.region.center, animated: true)
+            } else {
+                map.setRegion(camera.region, animated: true)
+            }
         }
 
         let existing = map.annotations.compactMap { $0 as? TargetAnnotation }
