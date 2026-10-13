@@ -75,7 +75,7 @@ jobs:
           APPEX=$APP/PlugIns/location-spoofer-tunnel.appex
           for F in "$APP"/Frameworks/*.dylib; do ldid -S "$F"; done
           ldid -STunnel/location-spoofer-tunnel.entitlements "$APPEX/location-spoofer-tunnel"
-          ldid -SResources/location-spoofer.entitlements "$APP/location-spoofer"
+          ldid -SResources/location-spoofer-jailbreak.entitlements "$APP/location-spoofer"
           echo "=== Entitlements de la app ==="
           ldid -e "$APP/location-spoofer"
           echo "=== Entitlements del tunel ==="

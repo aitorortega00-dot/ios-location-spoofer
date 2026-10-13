@@ -109,6 +109,8 @@ struct MapHomeView: View {
     @State private var showRestartLocationGuide = false
     @State private var showDisableGuide = false
     @State private var showRestartPhoneGuide = false
+    /// Status of the automatic Location Services restart (jailbreak builds). nil = not running.
+    @State private var autoRestartStatus: String? = nil
     @State private var currentLocationName: String = UserDefaults.standard.string(forKey: "currentLocationName") ?? ""
     @State private var vpnConnected: Bool = false
     @State private var vpnStatus: NEVPNStatus = .invalid
@@ -174,6 +176,7 @@ struct MapHomeView: View {
         }
         .sheet(isPresented: $showRestartLocationGuide) {
             restartLocationGuide
+                .task { await autoRestartLocation(onSuccess: completeActivation) }
         }
         .alert("Disable Spoofing", isPresented: $showDisableGuide) {
             Button("Cancel", role: .cancel) { }
@@ -185,6 +188,7 @@ struct MapHomeView: View {
         }
         .sheet(isPresented: $showRestartPhoneGuide) {
             disableRestartGuide
+                .task { await autoRestartLocation(onSuccess: completeDisable) }
         }
         .sheet(isPresented: $showFavoritesSheet) {
             favoritesSheet
@@ -453,27 +457,9 @@ struct MapHomeView: View {
             }
             .padding()
             Spacer()
+            autoRestartBanner
             Button("Done") {
-                showRestartLocationGuide = false
-                // pending → on
-                let name = UserDefaults.standard.string(forKey: "currentLocationName") ?? ""
-                DiagLog.add("User tapped [Done]: name=\(name), state→on, will stop VPN")
-                if !name.isEmpty {
-                    spoofingState = .on(name: name)
-                    // 镜头移到伪装位置,用户直观看到"已生效"
-                    if let target = spoofedDisplayCoord {
-                        lastKnownUserCoord = target  // 让"回到我的位置"按钮跳到伪装坐标
-                        withAnimation {
-                            cameraPosition = .region(MKCoordinateRegion(
-                                center: target,
-                                span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
-                            ))
-                        }
-                    }
-                }
-                // 定位已进系统缓存焊死,关 VPN 恢复全手机网络;伪装位置由 iOS 缓存维持,不受影响。
-                // 状态卡 .on 独立于 vpnConnected(全局观察者只刷 vpnStatus/vpnConnected,不重置 spoofingState)。
-                // VPN stays on: iOS keeps re-querying location, so the proxy must keep answering.
+                completeActivation()
             }
             .font(.headline)
             .frame(maxWidth: .infinity)
@@ -483,6 +469,70 @@ struct MapHomeView: View {
             .cornerRadius(12)
         }
         .padding(24)
+    }
+
+    /// pending → on. Called by the [Done] button or automatically after a successful auto-restart.
+    private func completeActivation() {
+        showRestartLocationGuide = false
+        // pending → on
+        let name = UserDefaults.standard.string(forKey: "currentLocationName") ?? ""
+        DiagLog.add("[Done] step completed: name=\(name), state→on, will stop VPN")
+        if !name.isEmpty {
+            spoofingState = .on(name: name)
+            // 镜头移到伪装位置,用户直观看到"已生效"
+            if let target = spoofedDisplayCoord {
+                lastKnownUserCoord = target  // 让"回到我的位置"按钮跳到伪装坐标
+                withAnimation {
+                    cameraPosition = .region(MKCoordinateRegion(
+                        center: target,
+                        span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                    ))
+                }
+            }
+        }
+        // 定位已进系统缓存焊死,关 VPN 恢复全手机网络;伪装位置由 iOS 缓存维持,不受影响。
+        // 状态卡 .on 独立于 vpnConnected(全局观察者只刷 vpnStatus/vpnConnected,不重置 spoofingState)。
+        // VPN stays on: iOS keeps re-querying location, so the proxy must keep answering.
+    }
+
+    /// pending → off. Called by the [Done] button or automatically after a successful auto-restart.
+    private func completeDisable() {
+        showRestartPhoneGuide = false
+        spoofingState = .off
+    }
+
+    /// Turns Location Services off, waits 3 s and turns it back on (jailbreak builds only),
+    /// then completes the step as if the user had tapped [Done].
+    /// If it fails (normal build / missing entitlements) the manual guide stays on screen.
+    @MainActor
+    private func autoRestartLocation(onSuccess: @escaping () -> Void) async {
+        guard autoRestartStatus == nil else { return }
+        autoRestartStatus = "Restarting Location Services automatically…"
+        let ok = await LocationServicesToggle.cycle(offSeconds: 3.0)
+        if ok {
+            autoRestartStatus = "Location Services restarted ✓"
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            autoRestartStatus = nil
+            DiagLog.add("[LocToggle] Auto-completing [Done]")
+            onSuccess()
+        } else {
+            autoRestartStatus = nil
+        }
+    }
+
+    /// Progress banner shown on both restart guides while the automatic restart runs.
+    @ViewBuilder
+    private var autoRestartBanner: some View {
+        if let status = autoRestartStatus {
+            HStack(spacing: 8) {
+                ProgressView()
+                Text(status).font(.subheadline)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(10)
+            .background(Color.blue.opacity(0.12))
+            .cornerRadius(10)
+        }
     }
 
     private var disableRestartGuide: some View {
@@ -504,9 +554,9 @@ struct MapHomeView: View {
             }
             .padding()
             Spacer()
+            autoRestartBanner
             Button("Done") {
-                showRestartPhoneGuide = false
-                spoofingState = .off
+                completeDisable()
             }
             .font(.headline)
             .frame(maxWidth: .infinity)
