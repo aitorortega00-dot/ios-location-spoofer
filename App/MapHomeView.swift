@@ -41,6 +41,8 @@ private final class LocationFetcher: NSObject, ObservableObject, CLLocationManag
     }
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        // Fires when Location Services is toggled; asking now would trigger the system alert.
+        guard !LocationServicesToggle.isCycling else { return }
         if manager.authorizationStatus == .authorizedWhenInUse || manager.authorizationStatus == .authorizedAlways {
             manager.requestLocation()
         }

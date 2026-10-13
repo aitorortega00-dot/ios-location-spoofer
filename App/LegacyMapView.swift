@@ -37,7 +37,8 @@ struct LegacyMapView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> MKMapView {
         let map = MKMapView(frame: .zero)
-        map.showsUserLocation = true
+        map.showsUserLocation = !LocationServicesToggle.isCycling
+        context.coordinator.map = map
         map.pointOfInterestFilter = .includingAll
         map.setRegion(camera.region, animated: false)
         context.coordinator.lastCameraID = camera.id
@@ -86,9 +87,25 @@ struct LegacyMapView: UIViewRepresentable {
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var onTap: (CLLocationCoordinate2D) -> Void
         var lastCameraID: UUID?
+        weak var map: MKMapView?
+        private var observers: [NSObjectProtocol] = []
 
         init(onTap: @escaping (CLLocationCoordinate2D) -> Void) {
             self.onTap = onTap
+            super.init()
+            // Pause user-location tracking while Location Services is being restarted,
+            // otherwise iOS shows the "Turn On Location Services…" alert.
+            let nc = NotificationCenter.default
+            observers.append(nc.addObserver(forName: .locationCycleWillStart, object: nil, queue: .main) { [weak self] _ in
+                self?.map?.showsUserLocation = false
+            })
+            observers.append(nc.addObserver(forName: .locationCycleDidEnd, object: nil, queue: .main) { [weak self] _ in
+                self?.map?.showsUserLocation = true
+            })
+        }
+
+        deinit {
+            observers.forEach { NotificationCenter.default.removeObserver($0) }
         }
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {

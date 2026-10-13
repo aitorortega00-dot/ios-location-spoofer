@@ -10,7 +10,20 @@ import ObjectiveC
 /// On a normal signed build the call is silently ignored by locationd,
 /// so every step verifies the real state and reports failure instead of
 /// pretending it worked — the manual guide then stays on screen.
+extension Notification.Name {
+    /// Posted (main thread) right before Location Services is turned off by `cycle`.
+    static let locationCycleWillStart = Notification.Name("LocationCycleWillStart")
+    /// Posted (main thread) once the cycle is over and Location Services has settled.
+    static let locationCycleDidEnd = Notification.Name("LocationCycleDidEnd")
+}
+
 enum LocationServicesToggle {
+    /// True while `cycle` runs. Anything that requests the user's location must
+    /// wait: asking while Location Services is off makes iOS show the
+    /// "Turn On Location Services…" system alert.
+    /// Only written on the main thread (inside `cycle`); plain static so non-isolated
+    /// delegate callbacks can read it without an actor hop.
+    nonisolated(unsafe) static private(set) var isCycling = false
     private static let setSelector = NSSelectorFromString("setLocationServicesEnabled:")
 
     /// True if the private selector exists on this iOS version.
@@ -52,7 +65,24 @@ enum LocationServicesToggle {
 
     /// Off → wait `offSeconds` → on, verifying each step and logging to DiagLog.
     /// Returns true only if both transitions were confirmed.
+    /// Maps pause their user-location tracking for the whole cycle (see notifications).
+    @MainActor
     static func cycle(offSeconds: Double = 3.0) async -> Bool {
+        isCycling = true
+        NotificationCenter.default.post(name: .locationCycleWillStart, object: nil)
+        // Give MapKit a moment to stop its location session before turning services off.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        let ok = await runCycle(offSeconds: offSeconds)
+
+        // Let locationd settle before maps start asking for the location again.
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        isCycling = false
+        NotificationCenter.default.post(name: .locationCycleDidEnd, object: nil)
+        return ok
+    }
+
+    private static func runCycle(offSeconds: Double) async -> Bool {
         guard isAPIAvailable else {
             DiagLog.add("[LocToggle] Private API not available on this iOS — manual restart needed")
             return false
