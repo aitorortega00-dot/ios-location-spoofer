@@ -14,6 +14,7 @@ while reverting the rebranding back to "Location Spoofer" with English UI.
 ## Key Files
 - App/ContentView.swift — Entry point (routes to FirstSetupView or MapHomeView)
 - App/MapHomeView.swift — Main map interface (location spoofing + status + favorites)
+- App/Joystick.swift — Joystick: metre-level moves via hot coordinate update (IPC "setCoords") + Location Services cycle
 - App/FirstSetupView.swift — First-time setup flow (VPN auth + certificate install + trust)
 - App/CoordinateInputView.swift — Location picker (map selection + search + favorites)
 - App/CoordinateConverter.swift — GCJ-02/WGS-84 coordinate conversion

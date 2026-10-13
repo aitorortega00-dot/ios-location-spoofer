@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"math/big"
 	"net/http"
 	"runtime/cgo"
@@ -36,6 +37,24 @@ var globalCACert *tls.Certificate
 var spoofLat float64 = 0.0
 var spoofLon float64 = 0.0
 var spoofingEnabled bool = false
+
+// coordsMu protege spoofLat/spoofLon/spoofingEnabled: el joystick los cambia en caliente
+// (golocationspoofer_setcoords) mientras el proxy atiende peticiones en otras goroutines.
+var coordsMu sync.RWMutex
+
+// getSpoofCoords devuelve una instantanea coherente de la coordenada activa.
+func getSpoofCoords() (lat, lon float64, enabled bool) {
+	coordsMu.RLock()
+	defer coordsMu.RUnlock()
+	return spoofLat, spoofLon, spoofingEnabled
+}
+
+// setSpoofCoords cambia la coordenada activa sin reiniciar el proxy.
+func setSpoofCoords(lat, lon float64, enabled bool) {
+	coordsMu.Lock()
+	spoofLat, spoofLon, spoofingEnabled = lat, lon, enabled
+	coordsMu.Unlock()
+}
 
 // 诊断日志环形缓冲:最近 maxLogEntries 条 logEvent 调用,带时间戳。
 // drainlogs 导出函数返回缓冲内容(C 串)给 Tunnel→App 诊断面板,clear 缓冲。
@@ -143,9 +162,7 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 		}
 	}()
 
-	spoofLat = float64(lat)
-	spoofLon = float64(lon)
-	spoofingEnabled = enabled != 0
+	setSpoofCoords(float64(lat), float64(lon), enabled != 0)
 
 	if certData != nil && keyData != nil {
 		certPEM := C.GoString(certData)
@@ -157,7 +174,8 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 			return 0
 		}
 		globalCACert = parsedCert
-		log.Printf("Location spoofer: MITM enabled, coordinates: %.6f, %.6f", spoofLat, spoofLon)
+		curLat, curLon, _ := getSpoofCoords()
+		log.Printf("Location spoofer: MITM enabled, coordinates: %.6f, %.6f", curLat, curLon)
 	}
 
 	proxy := goproxy.NewProxyHttpServer()
@@ -169,9 +187,9 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 		setupCertServing(proxy, globalCACert)
 	}
 
-	if spoofingEnabled {
-		setupLocationSpoofing(proxy)
-	}
+	// Siempre se registra: el handler consulta spoofingEnabled en cada peticion, asi
+	// golocationspoofer_setcoords puede activar/mover el spoof sin reiniciar el proxy.
+	setupLocationSpoofing(proxy)
 
 	srv := &http.Server{
 		Addr:    "127.0.0.1:8888",
@@ -190,7 +208,8 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 		}
 	}()
 
-	logEvent(fmt.Sprintf("Proxy started on 127.0.0.1:8888 mitm=%v spoofing=%v lat=%.6f lon=%.6f", globalCACert != nil, spoofingEnabled, spoofLat, spoofLon))
+	startLat, startLon, startEnabled := getSpoofCoords()
+	logEvent(fmt.Sprintf("Proxy started on 127.0.0.1:8888 mitm=%v spoofing=%v lat=%.6f lon=%.6f", globalCACert != nil, startEnabled, startLat, startLon))
 	return C.uintptr_t(h)
 }
 
@@ -216,11 +235,35 @@ func golocationspoofer_stopproxy(h C.uintptr_t) C.int {
 
 //export golocationspoofer_getcoords
 func golocationspoofer_getcoords() (lat, lon C.double, enabled C.int) {
+	curLat, curLon, curEnabled := getSpoofCoords()
 	var e C.int = 0
-	if spoofingEnabled {
+	if curEnabled {
 		e = 1
 	}
-	return C.double(spoofLat), C.double(spoofLon), e
+	return C.double(curLat), C.double(curLon), e
+}
+
+// golocationspoofer_setcoords cambia la coordenada del proxy en marcha (joystick).
+// Devuelve 0 si se aplico, 1 si la coordenada es invalida (se ignora).
+//
+//export golocationspoofer_setcoords
+func golocationspoofer_setcoords(lat C.double, lon C.double, enabled C.int) C.int {
+	if !applyCoords(float64(lat), float64(lon), enabled != 0) {
+		return 1
+	}
+	return 0
+}
+
+// applyCoords valida y aplica una coordenada nueva. Separada del export para poder testearla.
+func applyCoords(lat, lon float64, enabled bool) bool {
+	if enabled && (math.IsNaN(lat) || math.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+		logEvent(fmt.Sprintf("setcoords REJECTED invalid lat=%.7f lon=%.7f", lat, lon))
+		return false
+	}
+	prevLat, prevLon, _ := getSpoofCoords()
+	setSpoofCoords(lat, lon, enabled)
+	logEvent(fmt.Sprintf("setcoords hot update enabled=%v (%.7f, %.7f) -> (%.7f, %.7f)", enabled, prevLat, prevLon, lat, lon))
+	return true
 }
 
 func setupMITM(proxy *goproxy.ProxyHttpServer, cert *tls.Certificate) {
@@ -308,6 +351,9 @@ func setupLocationSpoofing(proxy *goproxy.ProxyHttpServer) {
 			h = strings.ToLower(req.URL.Hostname())
 		}
 		if h == "gs-loc.apple.com" || h == "gs-loc-cn.apple.com" {
+			if _, _, enabled := getSpoofCoords(); !enabled {
+				return req, nil // modo transparente
+			}
 			// DIAG: loguea cualquier peticion a estos hosts, aunque no sea /clls/wloc
 			logEvent(fmt.Sprintf("Request to loc host: %s %s%s", req.Method, req.Host, req.URL.Path))
 			if req.URL.Path == "/clls/wloc" && req.Method == "POST" {
@@ -358,10 +404,11 @@ func handleLocationRequest(req *http.Request) (*http.Request, *http.Response) {
 
 	// raw wire 递归 splice:只动 Location.Latitude(tag 1 varint)/Longitude(tag 2 varint)的字节,
 	// 其他所有字段(HorizontalAccuracy/Altitude/未知 tag/NumCellResults/DeviceType 等)wire 字节级保留。
-	lat := IntFromCoord(spoofLat)
-	lon := IntFromCoord(spoofLon)
+	curLat, curLon, _ := getSpoofCoords()
+	lat := IntFromCoord(curLat)
+	lon := IntFromCoord(curLon)
 	newPayload, modifiedFields := rewriteAppleWLocCoords(arpc.Payload, lat, lon)
-	logEvent(fmt.Sprintf("raw wire rewrite done in=%d B out=%d B modified %d lat/lon fields (spoof=(%.6f, %.6f))", len(arpc.Payload), len(newPayload), modifiedFields, spoofLat, spoofLon))
+	logEvent(fmt.Sprintf("raw wire rewrite done in=%d B out=%d B modified %d lat/lon fields (spoof=(%.7f, %.7f))", len(arpc.Payload), len(newPayload), modifiedFields, curLat, curLon))
 
 	// 手工构造 ARPC 响应:magic 8B + 大端 2B 长度 + payload
 	initialBytes, _ := hex.DecodeString("0001000000010000")

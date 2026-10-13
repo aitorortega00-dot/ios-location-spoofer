@@ -131,13 +131,18 @@ struct MapHomeView: View {
     @State private var spoofedDisplayCoord: CLLocationCoordinate2D? = nil
     @State private var lastKnownUserCoord: CLLocationCoordinate2D? = nil
     @State private var realUserCoord: CLLocationCoordinate2D? = nil
+    @StateObject private var joystick = JoystickController()
+    @State private var showJoystick = false
+    /// Target of the last joystick step (display coords). Shown as the map marker so it can be
+    /// compared with the blue dot (what iOS actually reports).
+    @State private var joystickMarker: CLLocationCoordinate2D? = nil
 
     var body: some View {
         ZStack {
             // 全屏地图
             LegacyMapView(
                 camera: cameraPosition,
-                markerCoordinate: selectedCoordinate,
+                markerCoordinate: joystickMarker ?? selectedCoordinate,
                 onTap: { coordinate in
                     selectCoordinate(coordinate)
                 }
@@ -147,8 +152,31 @@ struct MapHomeView: View {
             // 底部叠层:右下角"回到我的位置"按钮 + 底部卡片
             VStack(spacing: 0) {
                 Spacer()
+                if showJoystick {
+                    HStack {
+                        JoystickPanel(controller: joystick, onClose: { showJoystick = false })
+                        Spacer()
+                    }
+                    .padding(.leading, 12)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+                }
                 HStack {
                     Spacer()
+                    if case .on = spoofingState, !showJoystick {
+                        Button(action: {
+                            withAnimation { showJoystick = true }
+                        }) {
+                            Image(systemName: "dpad.fill")
+                                .font(.title3)
+                                .foregroundColor(.blue)
+                                .padding(12)
+                                .background(.regularMaterial)
+                                .clipShape(Circle())
+                                .shadow(radius: 3)
+                        }
+                        .accessibilityLabel("Open joystick")
+                    }
                     if let userCoord = lastKnownUserCoord {
                         Button(action: {
                             withAnimation {
@@ -200,7 +228,25 @@ struct MapHomeView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .onChange(of: spoofingState) { _, newState in
+            // The joystick only makes sense while spoofing is active.
+            if case .on = newState { return }
+            showJoystick = false
+            joystickMarker = nil
+        }
         .onAppear {
+            joystick.onMoved = { wgs in
+                let display = CoordinateConverter.wgs84ToGcj02(lat: wgs.latitude, lng: wgs.longitude)
+                joystickMarker = display
+                spoofedDisplayCoord = display
+                lastKnownUserCoord = display
+                withAnimation {
+                    cameraPosition = .region(MKCoordinateRegion(
+                        center: display,
+                        span: MKCoordinateSpan(latitudeDelta: 0.003, longitudeDelta: 0.003)
+                    ))
+                }
+            }
             refreshVPNStatus()
             loadSavedLocations()
             loadRecentLocations()

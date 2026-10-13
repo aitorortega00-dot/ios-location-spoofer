@@ -151,6 +151,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let handler = completionHandler else { return }
         let cmd = String(data: messageData, encoding: .utf8) ?? ""
+        // Joystick: "setCoords:<lat>,<lon>" (WGS-84). Responde "OK" o "ERR:<motivo>".
+        if cmd.hasPrefix("setCoords:") {
+            handleSetCoords(String(cmd.dropFirst("setCoords:".count)), handler: handler)
+            return
+        }
         switch cmd {
         case "getCoords":
             // 17 字节定长回包:1 字节 enabled + 8 字节 lat (LE) + 8 字节 lon (LE)。
@@ -181,6 +186,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // 未知命令保持原 echo 行为,兼容潜在旧调用方
             handler(messageData)
         }
+    }
+
+    private func handleSetCoords(_ args: String, handler: (Data?) -> Void) {
+        let parts = args.split(separator: ",")
+        guard parts.count == 2,
+              let lat = Double(parts[0]), let lon = Double(parts[1]) else {
+            handler(Data("ERR:bad-format".utf8))
+            return
+        }
+        guard let proxy = goLocationSpoofer else {
+            handler(Data("ERR:no-spoofer-object".utf8))
+            return
+        }
+        guard proxy.setCoords(lat: lat, lon: lon) else {
+            handler(Data("ERR:rejected running=\(proxy.isRunning())".utf8))
+            return
+        }
+        // Se guarda también en UserDefaults compartidos: si la VPN se reinicia,
+        // arranca ya en la última posición del joystick.
+        configuration.setCoordinates(latitude: lat, longitude: lon)
+        os_log("SPOOFTRACE joystick setCoords lat=%{public}f lon=%{public}f", log: OSLog.default, type: .default, lat, lon)
+        handler(Data("OK".utf8))
     }
 
     override func sleep(completionHandler: @escaping () -> Void) {
