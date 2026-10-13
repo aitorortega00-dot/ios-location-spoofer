@@ -53,7 +53,7 @@ enum LocationServicesToggle {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if await readState() == target { return true }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
         return await readState() == target
     }
@@ -71,14 +71,17 @@ enum LocationServicesToggle {
         isCycling = true
         NotificationCenter.default.post(name: .locationCycleWillStart, object: nil)
         // Give MapKit a moment to stop its location session before turning services off.
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        try? await Task.sleep(nanoseconds: 150_000_000)
 
         let ok = await runCycle(offSeconds: offSeconds)
 
-        // Let locationd settle before maps start asking for the location again.
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        isCycling = false
-        NotificationCenter.default.post(name: .locationCycleDidEnd, object: nil)
+        // Return right away so the caller can finish; maps resume in the background
+        // once locationd has settled, so they don't trigger the system alert.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            isCycling = false
+            NotificationCenter.default.post(name: .locationCycleDidEnd, object: nil)
+        }
         return ok
     }
 

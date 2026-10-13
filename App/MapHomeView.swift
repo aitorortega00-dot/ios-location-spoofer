@@ -113,6 +113,8 @@ struct MapHomeView: View {
     @State private var showRestartPhoneGuide = false
     /// Status of the automatic Location Services restart (jailbreak builds). nil = not running.
     @State private var autoRestartStatus: String? = nil
+    /// Set when the automatic restart failed: only then is the manual [Done] button shown.
+    @State private var autoRestartFailed = false
     @State private var currentLocationName: String = UserDefaults.standard.string(forKey: "currentLocationName") ?? ""
     @State private var vpnConnected: Bool = false
     @State private var vpnStatus: NEVPNStatus = .invalid
@@ -460,15 +462,17 @@ struct MapHomeView: View {
             .padding()
             Spacer()
             autoRestartBanner
-            Button("Done") {
-                completeActivation()
+            if autoRestartFailed {
+                Button("Done") {
+                    completeActivation()
+                }
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(Color.blue)
+                .foregroundColor(.white)
+                .cornerRadius(12)
             }
-            .font(.headline)
-            .frame(maxWidth: .infinity)
-            .padding()
-            .background(Color.blue)
-            .foregroundColor(.white)
-            .cornerRadius(12)
         }
         .padding(24)
     }
@@ -509,16 +513,16 @@ struct MapHomeView: View {
     @MainActor
     private func autoRestartLocation(onSuccess: @escaping () -> Void) async {
         guard autoRestartStatus == nil else { return }
+        autoRestartFailed = false
         autoRestartStatus = "Restarting Location Services automatically…"
         let ok = await LocationServicesToggle.cycle(offSeconds: 3.0)
+        autoRestartStatus = nil
         if ok {
-            autoRestartStatus = "Location Services restarted ✓"
-            try? await Task.sleep(nanoseconds: 700_000_000)
-            autoRestartStatus = nil
-            DiagLog.add("[LocToggle] Auto-completing [Done]")
+            DiagLog.add("[LocToggle] Auto-completing step")
             onSuccess()
         } else {
-            autoRestartStatus = nil
+            // Fallback: show the manual guide's [Done] button.
+            autoRestartFailed = true
         }
     }
 
@@ -557,15 +561,17 @@ struct MapHomeView: View {
             .padding()
             Spacer()
             autoRestartBanner
-            Button("Done") {
-                completeDisable()
+            if autoRestartFailed {
+                Button("Done") {
+                    completeDisable()
+                }
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding()
+                .background(Color.green)
+                .foregroundColor(.white)
+                .cornerRadius(12)
             }
-            .font(.headline)
-            .frame(maxWidth: .infinity)
-            .padding()
-            .background(Color.green)
-            .foregroundColor(.white)
-            .cornerRadius(12)
         }
         .padding(24)
     }
