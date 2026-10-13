@@ -228,7 +228,7 @@ struct MapHomeView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
-        .onChange(of: spoofingState) { _, newState in
+        .onChange(of: spoofingState) { newState in
             // The joystick only makes sense while spoofing is active.
             if case .on = newState { return }
             showJoystick = false
