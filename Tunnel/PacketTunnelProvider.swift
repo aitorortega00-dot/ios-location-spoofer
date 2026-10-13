@@ -17,6 +17,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     // Go location spoofer proxy integration
     private var goLocationSpoofer: GoLocationSpoofer?
     private var logTimer: DispatchSourceTimer?
+    private var joystickFiles: JoystickFileChannel?
 
     override func startTunnel(
         options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void
@@ -48,6 +49,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         os_log("Go proxy started successfully", log: OSLog.default, type: .info)
         os_log("SPOOFTRACE started lat=%{public}f lon=%{public}f mode=%{public}@", log: OSLog.default, type: .default, lat ?? 0, lon ?? 0, (lat != nil && lon != nil) ? "SPOOFING" : "TRANSPARENT")
         startLogPump()
+        let files = JoystickFileChannel { [weak self] lat, lon in
+            guard let proxy = self?.goLocationSpoofer else { return "no-spoofer-object" }
+            guard proxy.setCoords(lat: lat, lon: lon) else { return "rejected running=\(proxy.isRunning())" }
+            self?.configuration.setCoordinates(latitude: lat, longitude: lon)
+            return nil
+        }
+        files.start()
+        joystickFiles = files
         startTunnelWithProxy(completionHandler: completionHandler)
     }
 
@@ -144,6 +153,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
         }
 
+        joystickFiles?.stop()
+        joystickFiles = nil
         goLocationSpoofer = nil
         completionHandler()
     }
@@ -151,6 +162,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let handler = completionHandler else { return }
         let cmd = String(data: messageData, encoding: .utf8) ?? ""
+        // DIAG: confirms whether app messages reach the tunnel at all.
+        os_log("SPOOFTRACE appmsg received cmd=%{public}@", log: OSLog.default, type: .default, String(cmd.prefix(40)))
         // Joystick: "setCoords:<lat>,<lon>" (WGS-84). Responde "OK" o "ERR:<motivo>".
         if cmd.hasPrefix("setCoords:") {
             handleSetCoords(String(cmd.dropFirst("setCoords:".count)), handler: handler)

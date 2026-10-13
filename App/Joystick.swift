@@ -136,42 +136,40 @@ final class JoystickController: ObservableObject {
         DiagLog.add(String(format: "[Joystick] step %d N=%.2fm E=%.2fm (%.1fm) (%.7f, %.7f) → (%.7f, %.7f)",
                            n, north, east, distance, current.latitude, current.longitude, target.lat, target.lon))
 
-        // 1) Hot update in the tunnel. If the tunnel process does not answer (typically right after
-        //    installing a new build: iOS killed it but the VPN still reads "connected"), restart the
-        //    tunnel once and retry.
-        let command = String(format: "setCoords:%.8f,%.8f", target.lat, target.lon)
-        var result = await sendMessage(command)
-        if case .failure(let err) = result, err.isRecoverableByRestart {
-            DiagLog.add("[Joystick] step \(n) setCoords: \(err.text) — restarting tunnel and retrying once")
-            statusText = "Tunnel not answering — restarting it…"
-            if await restartTunnel() {
-                result = await sendMessage(command)
+        // 1) Deliver the coordinate to the tunnel. Three routes, fastest first:
+        //    a) sendProviderMessage — does not answer on some ldid-signed installs,
+        //    b) request file in the shared App Group container, polled by the tunnel every 0.25 s,
+        //    c) restart the VPN — the tunnel reads the stored coordinate at start (same as the normal flow).
+        LocationConfiguration.shared.setCoordinates(latitude: target.lat, longitude: target.lon)
+        var route = ""
+        switch await sendMessage(String(format: "setCoords:%.8f,%.8f", target.lat, target.lon)) {
+        case .success(let reply) where reply == "OK":
+            route = "ipc"
+        case .success(let reply):
+            DiagLog.add("[Joystick] step \(n) ipc rejected: \(reply)")
+        case .failure(let err):
+            DiagLog.add("[Joystick] step \(n) ipc unavailable: \(err.text)")
+        }
+        if route.isEmpty {
+            statusText = String(format: "Step %d: sending via shared file…", n)
+            if let err = await sendViaFile(lat: target.lat, lon: target.lon) {
+                DiagLog.add("[Joystick] step \(n) file channel: \(err)")
+            } else {
+                route = "file"
             }
         }
-        switch result {
-        case .success(let reply) where reply == "OK":
-            break
-        case .success(let reply):
-            DiagLog.add("[Joystick] step \(n) setCoords rejected by tunnel: \(reply)")
-            fail("Tunnel rejected the move: \(reply)")
-            return false
-        case .failure(let err):
-            DiagLog.add("[Joystick] step \(n) setCoords failed: \(err.text)")
-            fail("Move failed: \(err.text)")
-            return false
+        if route.isEmpty {
+            statusText = String(format: "Step %d: restarting VPN with the new position…", n)
+            DiagLog.add("[Joystick] step \(n) falling back to VPN restart")
+            guard await restartTunnel() else {
+                fail("Could not deliver the move to the tunnel. See diagnostics.")
+                return false
+            }
+            route = "vpn-restart"
         }
-        // Keep the app-side copy in sync (the tunnel already wrote it; this just refreshes the cache).
-        LocationConfiguration.shared.setCoordinates(latitude: target.lat, longitude: target.lon)
-
-        // 2) Confirm Go holds it
-        guard let go = await readGoCoords(),
-              abs(go.lat - target.lat) < 1e-7, abs(go.lon - target.lon) < 1e-7 else {
-            DiagLog.add("[Joystick] step \(n) getCoords mismatch after setCoords")
-            fail("Could not confirm the new coordinate in the proxy.")
-            return false
-        }
-        let tConfirm = Date().timeIntervalSince(started)
-        DiagLog.add(String(format: "[Joystick] step %d Go confirmed in %.2fs, restarting Location Services (off %.1fs)", n, tConfirm, offSeconds))
+        let tDelivered = Date().timeIntervalSince(started)
+        DiagLog.add(String(format: "[Joystick] step %d delivered via %@ in %.2fs, restarting Location Services (off %.1fs)",
+                           n, route, tDelivered, offSeconds))
         onMoved?(CLLocationCoordinate2D(latitude: target.lat, longitude: target.lon))
 
         // 3) Make iOS re-query Wi-Fi positions
@@ -254,7 +252,35 @@ final class JoystickController: ObservableObject {
         }
     }
 
-    /// Stops and starts the tunnel, then waits for the Go proxy to answer getCoords.
+    // MARK: - File channel (see Tunnel/JoystickFileChannel.swift)
+
+    /// Writes a request into the App Group container and waits for the tunnel's ack.
+    /// Returns nil on success, or the reason it failed.
+    private func sendViaFile(lat: Double, lon: Double, timeout: Double = 2.0) async -> String? {
+        guard let dir = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: "group.dev.duti.location-spoofer") else {
+            return "App Group container unavailable"
+        }
+        let seq = Int64(Date().timeIntervalSince1970 * 1000)
+        let request = String(format: "%lld,%.8f,%.8f", seq, lat, lon)
+        do {
+            try request.write(to: dir.appendingPathComponent("joystick-request.txt"), atomically: true, encoding: .utf8)
+        } catch {
+            return "could not write request: \(error.localizedDescription)"
+        }
+        let ackURL = dir.appendingPathComponent("joystick-ack.txt")
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let ack = try? String(contentsOf: ackURL, encoding: .utf8),
+               ack.hasPrefix("\(seq),") {
+                let result = String(ack.dropFirst("\(seq),".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                return result == "OK" ? nil : "tunnel answered \(result)"
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return String(format: "no ack from tunnel within %.1fs (old tunnel build still running?)", timeout)
+    }
+
+    /// Stops and starts the tunnel; on start it loads the coordinate stored in the App Group.
     private func restartTunnel() async -> Bool {
         guard let manager = await loadManager() else { return false }
         let started = Date()
@@ -273,16 +299,10 @@ final class JoystickController: ObservableObject {
             DiagLog.add("[Joystick] restartTunnel: never reached connected (status \(Self.describe(conn.status)))")
             return false
         }
-        // .connected does not mean the Go proxy is listening yet: poll it.
-        for _ in 0..<20 {
-            if await readGoCoords() != nil {
-                DiagLog.add(String(format: "[Joystick] restartTunnel OK in %.1fs", Date().timeIntervalSince(started)))
-                return true
-            }
-            try? await Task.sleep(nanoseconds: 300_000_000)
-        }
-        DiagLog.add("[Joystick] restartTunnel: proxy never answered getCoords")
-        return false
+        // .connected does not mean the Go proxy is listening yet (same 2 s buffer as the normal flow).
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        DiagLog.add(String(format: "[Joystick] restartTunnel OK in %.1fs", Date().timeIntervalSince(started)))
+        return true
     }
 
     private func waitForStatus(_ conn: NEVPNConnection, _ target: NEVPNStatus, timeout: Double) async -> Bool {
@@ -306,13 +326,6 @@ final class JoystickController: ObservableObject {
         }
     }
 
-    /// Same 17-byte "getCoords" protocol used by MapHomeView: 1 byte enabled + lat + lon (LE Double).
-    private func readGoCoords() async -> (lat: Double, lon: Double)? {
-        guard case .success(let data) = await sendRaw("getCoords"), data.count == 17 else { return nil }
-        let lat = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 1, as: Double.self) }
-        let lon = data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 9, as: Double.self) }
-        return (lat, lon)
-    }
 }
 
 /// Compact on-map panel: 8-direction pad, step size and Location Services off time.
