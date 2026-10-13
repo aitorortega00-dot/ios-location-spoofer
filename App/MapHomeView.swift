@@ -473,7 +473,7 @@ struct MapHomeView: View {
                 }
                 // 定位已进系统缓存焊死,关 VPN 恢复全手机网络;伪装位置由 iOS 缓存维持,不受影响。
                 // 状态卡 .on 独立于 vpnConnected(全局观察者只刷 vpnStatus/vpnConnected,不重置 spoofingState)。
-                ContentView.vpnManager?.connection.stopVPNTunnel()
+                // VPN stays on: iOS keeps re-querying location, so the proxy must keep answering.
             }
             .font(.headline)
             .frame(maxWidth: .infinity)
