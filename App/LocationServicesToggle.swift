@@ -102,13 +102,10 @@ enum LocationServicesToggle {
         }
         DiagLog.add("[LocToggle] Location Services OFF — waiting \(offSeconds)s")
 
-        // While services are off, clear the cached Wi-Fi positions so iOS has to ask
-        // the proxy again (replaces Settings › Reset Location & Privacy).
-        let offStart = Date()
-        let purged = await LocationCachePurge.run()
-        // locationd was killed: leave it at least 1 s to come back before turning on.
-        let remaining = max(purged ? 1.0 : 0, offSeconds - Date().timeIntervalSince(offStart))
-        try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+        // The cache purge through the tunnel is disabled: the unsandboxed tunnel stopped
+        // answering the app's messages. Stale cached Wi-Fi positions are handled by the
+        // LocSpoofGPS tweak instead (it replaces Wi-Fi fixes far from the spoof point).
+        try? await Task.sleep(nanoseconds: UInt64(offSeconds * 1_000_000_000))
 
         setEnabled(true)
         guard await waitForState(true, timeout: 5.0) else {

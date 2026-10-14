@@ -20,6 +20,7 @@
 #import <notify.h>
 #import <objc/runtime.h>
 #import <os/log.h>
+#import <dlfcn.h>
 
 #define LS_ENABLED "dev.duti.location-spoofer.tweak.enabled"
 #define LS_LAT     "dev.duti.location-spoofer.tweak.lat"
@@ -168,6 +169,8 @@ static BOOL LSIsProxy(id obj) {
 %ctor {
     const char *proc = getprogname();
     if (proc && strcmp(proc, "locationd") == 0) return;   // never touch the daemon itself
+    // Apps may load CoreLocation lazily; the hooks need the class to exist now.
+    dlopen("/System/Library/Frameworks/CoreLocation.framework/CoreLocation", RTLD_NOW);
     notify_register_check(LS_ENABLED, &gTokEnabled);
     notify_register_check(LS_LAT, &gTokLat);
     notify_register_check(LS_LON, &gTokLon);

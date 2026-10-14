@@ -33,6 +33,8 @@ enum TweakBridge {
 
     /// Logs what notifyd holds right now: our published state and the tweak's feedback.
     static func logStatus() {
+        let inApp = NSClassFromString("LSDelegateProxy") != nil
+        DiagLog.add("[Tweak] running inside this app: \(inApp ? "YES" : "NO")")
         guard let en = getState(enabledName), let la = getState(latName), let lo = getState(lonName) else {
             DiagLog.add("[Tweak] status: cannot read state from notifyd")
             return

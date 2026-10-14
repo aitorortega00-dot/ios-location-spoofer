@@ -1,6 +1,6 @@
 Package: dev.duti.locspoofgps
 Name: LocSpoof GPS Filter
-Version: 0.1.0
+Version: 0.1.1
 Architecture: iphoneos-arm64
 Description: Companion of Location Spoofer (experimental). While spoofing is on, location fixes that do not come from Wi-Fi (GPS, cell) are replaced with the spoofed coordinate, so satellite signal near windows can't pull the position back.
 Maintainer: aitorortega00-dot
