@@ -144,7 +144,8 @@ static BOOL LSIsProxy(id obj) {
 }
 
 - (CLLocation *)location {
-    return LSFix(%orig);
+    CLLocation *orig = %orig;
+    return LSFix(orig);
 }
 
 %end
