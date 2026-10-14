@@ -28,6 +28,39 @@ enum TweakBridge {
         DiagLog.add("[Tweak] state published: OFF\(ok ? "" : " (notify error)")")
     }
 
+    static let feedbackName = "dev.duti.location-spoofer.tweak.feedback"
+    static let loadedName = "dev.duti.location-spoofer.tweak.loaded"
+
+    /// Logs what notifyd holds right now: our published state and the tweak's feedback.
+    static func logStatus() {
+        guard let en = getState(enabledName), let la = getState(latName), let lo = getState(lonName) else {
+            DiagLog.add("[Tweak] status: cannot read state from notifyd")
+            return
+        }
+        DiagLog.add(String(format: "[Tweak] status: spoof %@ %.6f, %.6f",
+                           en == 1 ? "ON" : "OFF", Double(bitPattern: la), Double(bitPattern: lo)))
+        let loaded = getState(loadedName) ?? 0
+        DiagLog.add("[Tweak] loaded into \(loaded) process(es) since boot\(loaded == 0 ? " — tweak NOT active (not installed / not injected?)" : "")")
+        guard let fb = getState(feedbackName), fb != 0 else {
+            DiagLog.add("[Tweak] no location fixes seen yet (open Maps with spoof ON, then check again)")
+            return
+        }
+        let type = Int(fb & 0xFF) - 1
+        let dist = Int((fb >> 8) & 0xFFFF) * 10
+        let replaced = (fb >> 24) & 0xFFFFF
+        let kept = (fb >> 44) & 0xFFFFF
+        DiagLog.add("[Tweak] last fix: type=\(type) dist≈\(dist) m · replaced=\(replaced) kept=\(kept) (counters of the last app that got a fix)")
+    }
+
+    private static func getState(_ name: String) -> UInt64? {
+        var token: Int32 = -1
+        guard notify_register_check(name, &token) == NOTIFY_STATUS_OK else { return nil }
+        defer { notify_cancel(token) }
+        var v: UInt64 = 0
+        guard notify_get_state(token, &v) == NOTIFY_STATUS_OK else { return nil }
+        return v
+    }
+
     private static var tokens: [String: Int32] = [:]
     private static let lock = NSLock()
 

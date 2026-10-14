@@ -24,6 +24,8 @@
 #define LS_ENABLED "dev.duti.location-spoofer.tweak.enabled"
 #define LS_LAT     "dev.duti.location-spoofer.tweak.lat"
 #define LS_LON     "dev.duti.location-spoofer.tweak.lon"
+#define LS_FEEDBACK "dev.duti.location-spoofer.tweak.feedback"
+#define LS_LOADED   "dev.duti.location-spoofer.tweak.loaded"
 
 // Private CLLocationType values (CoreLocation): 1 GPS, 4 Wi-Fi, 6 cell, ...
 static const int kLSTypeWifi = 4;
@@ -36,8 +38,19 @@ static const double kLSReplacedAccuracy = 35.0;
 - (int)type;
 @end
 
-static int gTokEnabled = -1, gTokLat = -1, gTokLon = -1;
+static int gTokEnabled = -1, gTokLat = -1, gTokLon = -1, gTokFeedback = -1, gTokLoaded = -1;
 static unsigned long gLogCount = 0;
+static uint64_t gReplaced = 0, gKept = 0;
+
+// Feedback for the app's diagnostics panel (App/TweakBridge.swift decodes it):
+// bits 0-7 last type + 1, 8-23 last distance / 10 m, 24-43 replaced, 44-63 kept.
+static void LSFeedback(int type, double dist) {
+    if (gTokFeedback < 0) return;
+    uint64_t t = (uint64_t)((type + 1) & 0xFF);
+    uint64_t d = (uint64_t)MIN(MAX(dist, 0) / 10.0, 65535.0);
+    uint64_t v = t | (d << 8) | ((gReplaced & 0xFFFFF) << 24) | ((gKept & 0xFFFFF) << 44);
+    notify_set_state(gTokFeedback, v);
+}
 
 static BOOL LSGetSpoof(CLLocationCoordinate2D *out) {
     if (gTokEnabled < 0 || gTokLat < 0 || gTokLon < 0) return NO;
@@ -63,6 +76,8 @@ static CLLocation *LSFix(CLLocation *loc) {
     CLLocation *target = [[CLLocation alloc] initWithLatitude:s.latitude longitude:s.longitude];
     double dist = [loc distanceFromLocation:target];
     BOOL keep = (type == kLSTypeWifi && dist <= kLSMaxWifiDistance);
+    if (keep) gKept++; else gReplaced++;
+    LSFeedback(type, dist);
 
     unsigned long n = ++gLogCount;
     if (n <= 30 || n % 25 == 0) {
@@ -156,6 +171,12 @@ static BOOL LSIsProxy(id obj) {
     notify_register_check(LS_ENABLED, &gTokEnabled);
     notify_register_check(LS_LAT, &gTokLat);
     notify_register_check(LS_LON, &gTokLon);
+    notify_register_check(LS_FEEDBACK, &gTokFeedback);
+    if (notify_register_check(LS_LOADED, &gTokLoaded) == NOTIFY_STATUS_OK) {
+        uint64_t n = 0;
+        notify_get_state(gTokLoaded, &n);
+        notify_set_state(gTokLoaded, n + 1);
+    }
     %init;
     os_log(OS_LOG_DEFAULT, "SPOOFTWEAK loaded in %{public}s", proc ? proc : "?");
 }

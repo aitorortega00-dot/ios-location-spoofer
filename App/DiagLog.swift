@@ -32,7 +32,7 @@ final class DiagLog: ObservableObject {
 
     @Published private(set) var entries: [DiagEntry] = []
 
-    private let maxEntries = 100
+    private let maxEntries = 400
 
     private init() {}
 

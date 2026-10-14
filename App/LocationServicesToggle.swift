@@ -128,31 +128,19 @@ enum LocationCachePurge {
     /// Returns true if at least one cache database was cleaned and locationd restarted.
     @MainActor
     static func run() async -> Bool {
-        let start = Date()
         guard let session = ContentView.vpnManager?.connection as? NETunnelProviderSession,
               session.status == .connected else {
             DiagLog.add("[CachePurge] skipped — VPN not connected")
             return false
         }
-        let reply: String? = await withCheckedContinuation { cont in
-            let once = OnceFlag()
-            // Safety net: never wait more than 8 s for the tunnel.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-                if once.claim() { cont.resume(returning: nil) }
-            }
-            do {
-                try session.sendProviderMessage(Data("purgeCache".utf8)) { data in
-                    let text = data.flatMap { String(data: $0, encoding: .utf8) }
-                    DispatchQueue.main.async {
-                        if once.claim() { cont.resume(returning: text) }
-                    }
-                }
-            } catch {
-                DiagLog.add("[CachePurge] sendProviderMessage error: \(error.localizedDescription)")
-                if once.claim() { cont.resume(returning: nil) }
-            }
-        }
+        // Ping first: tells an IPC problem apart from a crash during the purge itself.
+        let ping = await sendRaw(session, "getCoords", timeout: 3)
+        DiagLog.add("[CachePurge] tunnel ping: \(ping.map { "\($0.count) bytes" } ?? "no reply")")
+
+        let start = Date()
+        let data = await sendRaw(session, "purgeCache", timeout: 8)
         let ms = Int(Date().timeIntervalSince(start) * 1000)
+        let reply = data.flatMap { String(data: $0, encoding: .utf8) }
         guard let reply, reply.hasPrefix("RC:") else {
             let what: String
             if let reply {
@@ -176,6 +164,27 @@ enum LocationCachePurge {
         }
         DiagLog.add("[CachePurge] FAILED (code \(rc), \(ms) ms) — use Settings › Reset Location & Privacy if the location drifts home")
         return false
+    }
+
+    /// Sends one IPC message to the tunnel; nil on error, empty reply or timeout.
+    @MainActor
+    private static func sendRaw(_ session: NETunnelProviderSession, _ cmd: String, timeout: Double) async -> Data? {
+        await withCheckedContinuation { cont in
+            let once = OnceFlag()
+            DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
+                if once.claim() { cont.resume(returning: nil) }
+            }
+            do {
+                try session.sendProviderMessage(Data(cmd.utf8)) { data in
+                    DispatchQueue.main.async {
+                        if once.claim() { cont.resume(returning: data) }
+                    }
+                }
+            } catch {
+                DiagLog.add("[CachePurge] sendProviderMessage(\(cmd)) error: \(error.localizedDescription)")
+                if once.claim() { cont.resume(returning: nil) }
+            }
+        }
     }
 }
 

@@ -53,6 +53,14 @@ struct SettingsView: View {
                         .foregroundColor(.red)
                         .disabled(diagLog.entries.isEmpty)
                 }) {
+                    Button(action: { TweakBridge.logStatus() }) {
+                        HStack {
+                            Image(systemName: "location.magnifyingglass")
+                            Text("Check GPS Tweak Status")
+                            Spacer()
+                        }
+                        .foregroundColor(.blue)
+                    }
                     Button(action: { queryGoLogsViaIPC() }) {
                         HStack {
                             Image(systemName: "arrow.down.doc")
