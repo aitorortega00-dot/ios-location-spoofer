@@ -154,7 +154,15 @@ enum LocationCachePurge {
         }
         let ms = Int(Date().timeIntervalSince(start) * 1000)
         guard let reply, reply.hasPrefix("RC:") else {
-            DiagLog.add("[CachePurge] FAILED — no answer from tunnel (\(ms) ms)")
+            let what: String
+            if let reply {
+                what = reply == "purgeCache"
+                    ? "tunnel echoed the command (old tunnel version still running?)"
+                    : "unexpected reply: \(reply.prefix(80))"
+            } else {
+                what = "empty reply (tunnel crashed or not reachable)"
+            }
+            DiagLog.add("[CachePurge] FAILED — \(what), vpn=\(session.status.rawValue) (\(ms) ms)")
             return false
         }
         let lines = reply.split(separator: "\n")

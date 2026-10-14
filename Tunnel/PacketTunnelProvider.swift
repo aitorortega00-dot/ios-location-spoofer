@@ -178,12 +178,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             handler(Data(logs.utf8))
         case "purgeCache":
+            os_log("SPOOFTRACE purgeCache received", log: OSLog.default, type: .default)
             // Clears locationd's cached Wi-Fi positions as root (jailbreak builds only).
             // Reply: "RC:<exit code>\n<report>". Runs off the provider queue (takes ~0.1–3 s).
             DispatchQueue.global(qos: .userInitiated).async {
                 var buf = [CChar](repeating: 0, count: 8192)
                 let rc = lcp_purge_as_root(&buf, Int32(buf.count))
                 let report = String(cString: buf)
+                os_log("SPOOFTRACE purgeCache rc=%d %{public}@", log: OSLog.default, type: .default, rc, report)
                 handler(Data("RC:\(rc)\n\(report)".utf8))
             }
         default:

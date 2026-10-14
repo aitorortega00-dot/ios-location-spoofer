@@ -50,6 +50,7 @@ class LocationConfiguration: ObservableObject {
         userDefaults.synchronize()
 
         os_log("Coordinates updated: %.6f, %.6f", log: OSLog.default, type: .info, latitude, longitude)
+        TweakBridge.publish(latitude: latitude, longitude: longitude)
     }
 
     func clearCoordinates() {
@@ -58,6 +59,7 @@ class LocationConfiguration: ObservableObject {
         userDefaults.synchronize()
 
         os_log("Coordinates cleared - transparent mode", log: OSLog.default, type: .info)
+        TweakBridge.clear()
     }
     
     func synchronize() {
