@@ -41,6 +41,10 @@ targets:
         CODE_SIGN_STYLE: Manual
         CODE_SIGN_IDENTITY: "Apple Distribution"
         PROVISIONING_PROFILE_SPECIFIER: "LocationSpoofer AppStore"
+        SWIFT_OBJC_BRIDGING_HEADER: "App/location-spoofer-Bridging-Header.h"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - "-lsqlite3"
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: "$(inherited)"
         LD_RUNPATH_SEARCH_PATHS:
           - "$(inherited)"

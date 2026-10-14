@@ -101,15 +101,46 @@ enum LocationServicesToggle {
         }
         DiagLog.add("[LocToggle] Location Services OFF — waiting \(offSeconds)s")
 
-        try? await Task.sleep(nanoseconds: UInt64(offSeconds * 1_000_000_000))
+        // While services are off, clear the cached Wi-Fi positions so iOS has to ask
+        // the proxy again (replaces Settings › Reset Location & Privacy).
+        let offStart = Date()
+        let purged = await LocationCachePurge.run()
+        // locationd was killed: leave it at least 1 s to come back before turning on.
+        let remaining = max(purged ? 1.0 : 0, offSeconds - Date().timeIntervalSince(offStart))
+        try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
 
         setEnabled(true)
-        guard await waitForState(true, timeout: 3.0) else {
+        guard await waitForState(true, timeout: 5.0) else {
             DiagLog.add("[LocToggle] Could not turn back ON — turn it on manually in Settings!")
             return false
         }
         let total = Date().timeIntervalSince(start)
         DiagLog.add(String(format: "[LocToggle] Location Services ON — cycle OK (%.1fs total)", total))
         return true
+    }
+}
+
+/// Clears locationd's cached Wi-Fi access-point positions (jailbreak builds only).
+/// See App/LocationCachePurge.c. Never blocks the cycle: on failure it only logs.
+enum LocationCachePurge {
+    /// Returns true if at least one cache database was cleaned and locationd restarted.
+    static func run() async -> Bool {
+        await Task.detached(priority: .userInitiated) { () -> Bool in
+            let start = Date()
+            var buf = [CChar](repeating: 0, count: 8192)
+            let rc = lcp_purge_as_root(&buf, Int32(buf.count))
+            let report = String(cString: buf)
+            let ms = Int(Date().timeIntervalSince(start) * 1000)
+            for line in report.split(separator: "\n") {
+                DiagLog.add("[CachePurge] \(line)")
+            }
+            if rc == 0 {
+                DiagLog.add("[CachePurge] OK — Wi-Fi location cache cleared (\(ms) ms)")
+                return true
+            } else {
+                DiagLog.add("[CachePurge] FAILED (code \(rc), \(ms) ms) — use Settings › Reset Location & Privacy if the location drifts home")
+                return false
+            }
+        }.value
     }
 }

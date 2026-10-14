@@ -22,5 +22,11 @@
     <true/>
     <key>com.apple.locationd.status</key>
     <true/>
+    <!-- Unsandboxed + persona-mgmt: lets the app re-launch itself as root to clear
+         locationd's Wi-Fi position cache (App/LocationCachePurge.c). -->
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.persona-mgmt</key>
+    <true/>
 </dict>
 </plist>
