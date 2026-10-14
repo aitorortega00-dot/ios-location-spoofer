@@ -177,6 +177,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             handler(Data(logs.utf8))
+        case "purgeCache":
+            // Clears locationd's cached Wi-Fi positions as root (jailbreak builds only).
+            // Reply: "RC:<exit code>\n<report>". Runs off the provider queue (takes ~0.1–3 s).
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buf = [CChar](repeating: 0, count: 8192)
+                let rc = lcp_purge_as_root(&buf, Int32(buf.count))
+                let report = String(cString: buf)
+                handler(Data("RC:\(rc)\n\(report)".utf8))
+            }
         default:
             // 未知命令保持原 echo 行为,兼容潜在旧调用方
             handler(messageData)

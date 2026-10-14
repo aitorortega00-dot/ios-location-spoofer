@@ -14,9 +14,11 @@
 //  also forgets its in-memory copy (launchd relaunches it on demand).
 //
 //  How it runs:
-//    1. The app calls lcp_purge_as_root(), which re-launches the app's own
-//       executable as root (persona override, needs com.apple.private.persona-mgmt
-//       and an unsandboxed app) with the argument --purge-location-cache.
+//    1. The app sends "purgeCache" to the tunnel extension, which calls
+//       lcp_purge_as_root(). That re-launches the extension's own executable as
+//       root (persona override; needs com.apple.private.persona-mgmt and an
+//       unsandboxed extension, see location-spoofer-tunnel-jailbreak.entitlements)
+//       with the argument --purge-location-cache.
 //    2. In that child, the constructor below runs before Swift/UIKit start,
 //       does the purge, prints a report on stdout and exits.
 //

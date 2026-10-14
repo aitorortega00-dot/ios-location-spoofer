@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the ldid-signed tunnel (jailbreak / TrollStore only).
+  Same as location-spoofer-tunnel.entitlements plus unsandboxed + persona-mgmt,
+  so the tunnel can re-launch itself as root to clear locationd's Wi-Fi position
+  cache (Tunnel/LocationCachePurge.c). Kept out of the app on purpose: unsandboxing
+  the app broke the MapKit map. Do NOT use for App Store / TestFlight signing.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+    </array>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.dev.duti.location-spoofer</string>
+    </array>
+    <key>com.apple.private.security.no-sandbox</key>
+    <true/>
+    <key>com.apple.private.persona-mgmt</key>
+    <true/>
+</dict>
+</plist>
