@@ -88,7 +88,11 @@ enum CacheShield {
                 case .disconnected, .invalid:
                     if box.stopping {
                         box.stopping = false
-                        do { try manager.connection.startVPNTunnel() } catch { finish(false) }
+                        do { try manager.connection.startVPNTunnel() } catch {
+                            // Auto-reconnect may have started it already; wait for .connected.
+                            let st = manager.connection.status
+                            if st != .connecting && st != .connected && st != .reasserting { finish(false) }
+                        }
                     } else if conn.status == .invalid {
                         finish(false)
                     }
@@ -156,6 +160,9 @@ enum CacheShield {
               let manager = ContentView.vpnManager,
               manager.connection.status != .disconnected else { return }
         DiagLog.add("[shield] turned off in Settings, stopping VPN")
-        manager.connection.stopVPNTunnel()
+        // Auto-reconnect off first, or iOS would start the VPN again right away.
+        VPNKeepAlive.update(wanted: false) {
+            manager.connection.stopVPNTunnel()
+        }
     }
 }

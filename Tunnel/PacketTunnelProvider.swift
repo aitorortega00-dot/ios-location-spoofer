@@ -47,6 +47,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         os_log("Go proxy started successfully", log: OSLog.default, type: .info)
         os_log("SPOOFTRACE started lat=%{public}f lon=%{public}f mode=%{public}@", log: OSLog.default, type: .default, lat ?? 0, lon ?? 0, (lat != nil && lon != nil) ? "SPOOFING" : "TRANSPARENT")
+        recordEvent("tunnel started (\((lat != nil && lon != nil) ? "spoofing" : "shield"))")
         startLogPump()
         startTunnelWithProxy(completionHandler: completionHandler)
     }
@@ -135,6 +136,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         with reason: NEProviderStopReason, completionHandler: @escaping () -> Void
     ) {
         os_log("Tunnel stopping, reason: %ld", log: OSLog.default, type: .info, reason.rawValue)
+        recordEvent("tunnel stopped (reason \(reason.rawValue))")
 
         if let proxy = goLocationSpoofer {
             if proxy.stopProxy() {
@@ -198,11 +200,45 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
+    // MARK: - Sleep / wake records
+    //
+    // iOS pauses the extension while the screen is locked. Record when it happens so the
+    // app can show it in the diagnostics log (VPNKeepAlive.collectTunnelEvents).
+
+    private var sleptAt: Date?
+    private static let groupSuite = "group.dev.duti.location-spoofer"
+    private static let eventsKey = "tunnelEvents"
+    private static let timeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "dd/MM HH:mm:ss"
+        return f
+    }()
+
+    private func recordEvent(_ text: String) {
+        guard let defaults = UserDefaults(suiteName: Self.groupSuite) else { return }
+        var events = defaults.stringArray(forKey: Self.eventsKey) ?? []
+        events.append("\(Self.timeFormatter.string(from: Date())) \(text)")
+        if events.count > 30 { events.removeFirst(events.count - 30) }
+        defaults.set(events, forKey: Self.eventsKey)
+        defaults.synchronize()
+    }
+
     override func sleep(completionHandler: @escaping () -> Void) {
+        sleptAt = Date()
+        os_log("SPOOFTRACE sleep", log: OSLog.default, type: .default)
         completionHandler()
     }
 
     override func wake() {
+        guard let since = sleptAt else { return }
+        sleptAt = nil
+        let gap = Int(Date().timeIntervalSince(since))
+        let running = (goLocationSpoofer?.isRunning() ?? false) ? 1 : 0
+        os_log("SPOOFTRACE wake gap=%{public}ds running=%{public}d", log: OSLog.default, type: .default, gap, running)
+        // Short naps are constant while locked; only keep the long ones.
+        if gap >= 30 {
+            recordEvent("paused \(gap)s while locked, proxy \(running == 1 ? "still running" : "NOT running")")
+        }
     }
 }
 

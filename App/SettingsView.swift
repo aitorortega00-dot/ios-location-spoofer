@@ -7,6 +7,7 @@ struct SettingsView: View {
     @State private var showCopiedToast = false
     @ObservedObject private var diagLog = DiagLog.shared
     @State private var shieldOn = CacheShield.isEnabled
+    @State private var autoReconnectOn = VPNKeepAlive.isEnabled
 
     var body: some View {
         NavigationView {
@@ -35,15 +36,23 @@ struct SettingsView: View {
                             if on {
                                 CacheShield.ensureRunningIfIdle(isSpoofingOff: {
                                     LocationConfiguration.shared.currentCoordinates == nil
-                                }) { _ in }
+                                }) { ok in
+                                    if ok { VPNKeepAlive.update(wanted: true) }
+                                }
                             } else {
                                 CacheShield.stopIfIdle()
                             }
                         }
+                    Toggle("Auto-reconnect VPN", isOn: $autoReconnectOn)
+                        .onChange(of: autoReconnectOn) { on in
+                            VPNKeepAlive.isEnabled = on
+                            DiagLog.add("[keepalive] Settings toggle → \(on ? "on" : "off")")
+                            VPNKeepAlive.update(wanted: VPNKeepAlive.vpnShouldRun)
+                        }
                 } header: {
                     Text("Wi-Fi cache")
                 } footer: {
-                    Text("Keeps the VPN on while spoofing is off and blocks Apple's Wi-Fi location lookups, so iOS stops caching your real Wi-Fi positions (the cause of the big grey circle pulling you home). Your real location still works through GPS and cell towers, a bit less precisely indoors. Turn off to get the old behaviour (VPN fully off).")
+                    Text("Keeps the VPN on while spoofing is off and blocks Apple's Wi-Fi location lookups, so iOS stops caching your real Wi-Fi positions (the cause of the big grey circle pulling you home). Your real location still works through GPS and cell towers, a bit less precisely indoors. Turn off to get the old behaviour (VPN fully off).\n\nAuto-reconnect: if iOS stops the VPN (screen locked for a long time, reboot), it starts again by itself with the same location, without opening the app. When you open the app it also checks the spoof is still on and repairs it.")
                 }
 
                 // 诊断信息
@@ -244,8 +253,10 @@ struct SettingsView: View {
     // MARK: - 重置 App
 
     private func resetApp() {
-        // 断开 VPN
-        ContentView.vpnManager?.connection.stopVPNTunnel()
+        // 断开 VPN (auto-reconnect off first, or iOS would restart it)
+        VPNKeepAlive.update(wanted: false) {
+            ContentView.vpnManager?.connection.stopVPNTunnel()
+        }
         // 清坐标
         LocationConfiguration.shared.clearCoordinates()
         // 清所有 UserDefaults key

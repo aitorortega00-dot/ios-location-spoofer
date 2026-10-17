@@ -130,6 +130,9 @@ struct MapHomeView: View {
     @StateObject private var searchCompleter = SearchCompleterHelper()
     @StateObject private var health = SpoofHealthMonitor()
     @State private var showCacheHelp = false
+    @State private var checkupDone = false
+    @State private var resumeBanner: String? = nil
+    @Environment(\.scenePhase) private var scenePhase
     @State private var spoofedDisplayCoord: CLLocationCoordinate2D? = nil
     @State private var lastKnownUserCoord: CLLocationCoordinate2D? = nil
     @State private var realUserCoord: CLLocationCoordinate2D? = nil
@@ -244,19 +247,96 @@ struct MapHomeView: View {
             // The VPN manager loads asynchronously (ContentView): re-check the real state shortly
             // after launch, fix the status card, and bring the cache shield back up if needed.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                checkupDone = true
+                runCheckup(reason: "launch")
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            // Back from the background / lock screen: make sure the spoof is still being served.
+            guard phase == .active, checkupDone else { return }
+            runCheckup(reason: "foreground")
+        }
+    }
+
+    /// Checks that what the app thinks is running is really running, and repairs it:
+    /// - spoof saved but VPN down (iOS stopped it while locked, reboot…) → bring it back
+    /// - VPN up but the proxy has other coordinates → switch them live and reapply
+    /// - nothing to spoof and shield on but VPN down → start the shield
+    private func runCheckup(reason: String) {
+        refreshVPNStatus()
+        VPNKeepAlive.collectTunnelEvents()
+        // Never interfere with a flow already in progress.
+        if case .pending = spoofingState { return }
+        guard !isSpoofing, !showRestartLocationGuide, !showRestartPhoneGuide else { return }
+
+        let name = UserDefaults.standard.string(forKey: "currentLocationName") ?? ""
+        guard let c = LocationConfiguration.shared.currentCoordinates, !name.isEmpty else {
+            CacheShield.ensureRunningIfIdle(isSpoofingOff: {
+                if case .off = spoofingState { return true }
+                return false
+            }) { ok in
                 refreshVPNStatus()
-                let name = UserDefaults.standard.string(forKey: "currentLocationName") ?? ""
-                if case .off = spoofingState, vpnConnected, !name.isEmpty,
-                   LocationConfiguration.shared.currentCoordinates != nil {
-                    spoofingState = .on(name: name)
+                if ok { VPNKeepAlive.update(wanted: true) }
+            }
+            return
+        }
+
+        guard let manager = ContentView.vpnManager else { return }
+        switch manager.connection.status {
+        case .connected:
+            queryGoCoordsViaIPC { r in
+                if let r, r.enabled, abs(r.lat - c.latitude) < 1e-5, abs(r.lon - c.longitude) < 1e-5 {
+                    if case .on = spoofingState {} else {
+                        DiagLog.add("[resume] (\(reason)) spoof still active in the VPN, status card restored")
+                        spoofingState = .on(name: name)
+                    }
+                    VPNKeepAlive.update(wanted: true)
+                    return
                 }
-                CacheShield.ensureRunningIfIdle(isSpoofingOff: {
-                    if case .off = spoofingState { return true }
-                    return false
-                }) { _ in
-                    refreshVPNStatus()
+                DiagLog.add("[resume] (\(reason)) VPN up but proxy not serving the spoof (\(r == nil ? "no reply" : "enabled=\(r!.enabled)")), fixing")
+                CacheShield.sendSetCoords(lat: c.latitude, lon: c.longitude, enabled: true) { ok in
+                    if ok {
+                        showResumeBanner("Spoof restored after the VPN was interrupted")
+                        spoofingState = .pending(name: name, isClosing: false)
+                        showRestartLocationGuide = true  // reapply: restarts Location Services
+                    } else {
+                        resumeSpoof(name: name, coords: c, reason: reason)
+                    }
                 }
             }
+        case .connecting, .reasserting:
+            // Auto-reconnect is bringing it back; check again in a moment.
+            DiagLog.add("[resume] (\(reason)) VPN is reconnecting, checking again in 3s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { runCheckup(reason: reason) }
+        default:
+            resumeSpoof(name: name, coords: c, reason: reason)
+        }
+    }
+
+    /// The spoof was on but the VPN is down: start it again with the saved coordinates
+    /// and restart Location Services so iOS drops whatever it learned meanwhile.
+    private func resumeSpoof(name: String, coords c: Coordinates, reason: String) {
+        DiagLog.add("[resume] (\(reason)) spoof was on but the VPN is down, bringing it back")
+        spoofingState = .pending(name: name, isClosing: false)
+        isSpoofing = true
+        connectVPNForSpoofing(expectedLat: c.latitude, expectedLon: c.longitude) { success, errorMsg in
+            DispatchQueue.main.async {
+                isSpoofing = false
+                if success {
+                    showResumeBanner("Spoof restored after the VPN was stopped")
+                    showRestartLocationGuide = true  // auto restart → completeActivation → .on
+                } else {
+                    DiagLog.add("[resume] failed: \(errorMsg ?? "unknown error")")
+                    spoofingState = .failed(reason: errorMsg ?? "could not restore the VPN")
+                }
+            }
+        }
+    }
+
+    private func showResumeBanner(_ text: String) {
+        resumeBanner = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+            if resumeBanner == text { resumeBanner = nil }
         }
     }
 
@@ -278,6 +358,15 @@ struct MapHomeView: View {
     /// Warning shown under the status when the location escapes while spoofing.
     @ViewBuilder
     private var healthBanner: some View {
+        if let text = resumeBanner {
+            Label(text, systemImage: "arrow.clockwise.circle")
+                .font(.subheadline)
+                .foregroundColor(.blue)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color.blue.opacity(0.10))
+                .cornerRadius(12)
+        }
         if case .on = spoofingState, let issue = health.issue {
             VStack(alignment: .leading, spacing: 8) {
                 switch issue {
@@ -588,12 +677,15 @@ struct MapHomeView: View {
         // 定位已进系统缓存焊死,关 VPN 恢复全手机网络;伪装位置由 iOS 缓存维持,不受影响。
         // 状态卡 .on 独立于 vpnConnected(全局观察者只刷 vpnStatus/vpnConnected,不重置 spoofingState)。
         // VPN stays on: iOS keeps re-querying location, so the proxy must keep answering.
+        // Let iOS bring it back by itself if it drops (screen locked, reboot…).
+        VPNKeepAlive.update(wanted: true)
     }
 
     /// pending → off. Called by the [Done] button or automatically after a successful auto-restart.
     private func completeDisable() {
         showRestartPhoneGuide = false
         spoofingState = .off
+        VPNKeepAlive.update(wanted: CacheShield.isEnabled)
     }
 
     /// Turns Location Services off, waits 3 s and turns it back on (jailbreak builds only),
@@ -836,11 +928,11 @@ struct MapHomeView: View {
         if !vpnConnected {
             connectVPNForSpoofing(expectedLat: converted.latitude, expectedLon: converted.longitude) { success, errorMsg in
                 if success {
-                    DiagLog.add("[cold-start] connectVPNForSpoofing callback success → close sheet, show tutorial in 1s")
+                    DiagLog.add("[cold-start] connectVPNForSpoofing callback success → close sheet, show tutorial in 0.3s")
                     // VPN 连上后,弹出"重启定位服务"教学
                     DispatchQueue.main.async {
                         showLocationSheet = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                             showRestartLocationGuide = true
                             DiagLog.add("[cold-start] Restart Location Services tutorial shown")
                             isSpoofing = false
@@ -870,7 +962,7 @@ struct MapHomeView: View {
                 }
                 confirmCoordsReady(expectedLat: converted.latitude, expectedLon: converted.longitude, timeout: 5) { matched in
                     DiagLog.add("[live] coords \(matched ? "confirmed" : "not confirmed, continuing anyway"), showing restart tutorial")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                         showRestartLocationGuide = true
                         isSpoofing = false
                     }
@@ -923,7 +1015,7 @@ struct MapHomeView: View {
 
             let retryOrFail: () -> Void = {
                 if Date() < deadline {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                         attempt()
                     }
                 } else {
@@ -952,11 +1044,11 @@ struct MapHomeView: View {
             }
             conn.start(queue: .main)
 
-            // 单次 connect 1 秒兜底
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            // Per-attempt limit: a local port answers in milliseconds, so 0.5 s is plenty.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 guard !settled else { return }
                 settled = true
-                DiagLog.add("[probe] Attempt \(myAttempt) 1s timeout, retrying")
+                DiagLog.add("[probe] Attempt \(myAttempt) 0.5s timeout, retrying")
                 conn.cancel()
                 retryOrFail()
             }
@@ -1023,12 +1115,12 @@ struct MapHomeView: View {
                         completion(true)
                         return
                     }
-                    DiagLog.add("[confirm] Attempt \(myAttempt) mismatch Go=(\(String(format: "%.6f", r.lat)), \(String(format: "%.6f", r.lon))) dLat=\(String(format: "%.6f", dLat)) dLon=\(String(format: "%.6f", dLon)), retry in 0.3s")
+                    DiagLog.add("[confirm] Attempt \(myAttempt) mismatch Go=(\(String(format: "%.6f", r.lat)), \(String(format: "%.6f", r.lon))) dLat=\(String(format: "%.6f", dLat)) dLon=\(String(format: "%.6f", dLon)), retry in 0.15s")
                 } else {
-                    DiagLog.add("[confirm] Attempt \(myAttempt) IPC failed, retry in 0.3s")
+                    DiagLog.add("[confirm] Attempt \(myAttempt) IPC failed, retry in 0.15s")
                 }
                 if Date() < deadline {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { attempt() }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { attempt() }
                 } else {
                     let elapsed = Date().timeIntervalSince(started)
                     DiagLog.add("[confirm] Attempt \(myAttempt) timed out, coord confirmation gave up (\(String(format: "%.2f", elapsed))s))")
@@ -1118,8 +1210,14 @@ struct MapHomeView: View {
                     try manager.connection.startVPNTunnel()
                     DiagLog.add("[cold-start] startVPNTunnel called, waiting for .connected event")
                 } catch {
-                    finish(false, "VPN start failed: \(error.localizedDescription)")
-                    return
+                    // Auto-reconnect may already be bringing the tunnel up: keep waiting then.
+                    let st = manager.connection.status
+                    if st == .connecting || st == .reasserting {
+                        DiagLog.add("[cold-start] startVPNTunnel threw while already \(st.diagDesc), waiting")
+                    } else {
+                        finish(false, "VPN start failed: \(error.localizedDescription)")
+                        return
+                    }
                 }
 
                 // 30 秒超时(与 restartVPNForNewCoordinates 保持一致)
@@ -1168,14 +1266,14 @@ struct MapHomeView: View {
                         confirmCoordsReady(expectedLat: expectedLat, expectedLon: expectedLon, timeout: 15) { matched in
                             if matched {
                                 DiagLog.add("[hot-restart] Coords confirmed, showing restart Location Services tutorial in 0.3s")
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                     showRestartLocationGuide = true
                                     DiagLog.add("[hot-restart] Restart Location Services tutorial shown")
                                     isSpoofing = false
                                 }
                             } else {
                                 DiagLog.add("[hot-restart] Coord confirmation timed out, continuing anyway (temporary)")
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                                     showRestartLocationGuide = true
                                     isSpoofing = false
                                 }
@@ -1214,7 +1312,11 @@ struct MapHomeView: View {
                 do {
                     try manager.connection.startVPNTunnel()
                 } catch {
-                    finish(false, "VPN start failed: \(error.localizedDescription)")
+                    // Auto-reconnect may have started it already; the timeout still applies.
+                    let st = manager.connection.status
+                    if st != .connecting && st != .connected && st != .reasserting {
+                        finish(false, "VPN start failed: \(error.localizedDescription)")
+                    }
                 }
             case (1, .connected):
                 DiagLog.add("[hot-restart] phase 1 got .connected, calling finish(true)")
@@ -1264,11 +1366,13 @@ struct MapHomeView: View {
         }
 
         guard CacheShield.isEnabled else {
-            // 关 VPN
-            if let manager = ContentView.vpnManager {
-                manager.connection.stopVPNTunnel()
+            // 关 VPN — auto-reconnect off first, or iOS would bring it straight back.
+            VPNKeepAlive.update(wanted: false) {
+                if let manager = ContentView.vpnManager {
+                    manager.connection.stopVPNTunnel()
+                }
+                showGuide()
             }
-            showGuide()
             return
         }
 
