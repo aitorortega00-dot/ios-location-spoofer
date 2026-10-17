@@ -12,6 +12,9 @@
 //            happening, Reset Location & Privacy with the VPN off.
 //
 //  It only reads locations; it never changes anything in the system.
+//  It asks for low accuracy on purpose: asking for the best accuracy kept the GPS
+//  chip powered while the app was open, which made escapes near windows more likely.
+//  GPS fixes requested by other apps are still seen and reported.
 //
 
 import Foundation
@@ -40,8 +43,9 @@ final class SpoofHealthMonitor: NSObject, ObservableObject, CLLocationManagerDel
     override init() {
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.distanceFilter = 10
+        // Low accuracy: don't switch the GPS on just to watch (see header).
+        manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
+        manager.distanceFilter = 50
         // Location Services is switched off during the automatic restart; asking for the
         // location then makes iOS show the "Turn On Location Services" alert.
         observers.append(NotificationCenter.default.addObserver(
