@@ -18,6 +18,28 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var goLocationSpoofer: GoLocationSpoofer?
     private var logTimer: DispatchSourceTimer?
 
+    // The log pump drains the Go buffer every 2 s (for 3uTools), which used to leave the
+    // app's "Fetch Go Proxy Logs" empty. Keep the last lines here for the app as well.
+    private var recentLogs: [String] = []
+    private let recentLogsLock = NSLock()
+    private var appMessages = 0
+    private let startedAt = Date()
+
+    private func keepRecent(_ lines: [String]) {
+        recentLogsLock.lock()
+        recentLogs.append(contentsOf: lines)
+        if recentLogs.count > 150 { recentLogs.removeFirst(recentLogs.count - 150) }
+        recentLogsLock.unlock()
+    }
+
+    private func takeRecent() -> [String] {
+        recentLogsLock.lock()
+        defer { recentLogsLock.unlock() }
+        let out = recentLogs
+        recentLogs.removeAll()
+        return out
+    }
+
     override func startTunnel(
         options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void
     ) {
@@ -62,9 +84,11 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             if let logs = self?.goLocationSpoofer?.drainGoLogs() {
                 // Una linea de log por mensaje, cada una con prefijo SPOOFTRACE,
                 // para que el filtro de 3uTools no oculte las lineas posteriores a un salto de linea.
-                for line in logs.split(separator: "\n") {
-                    os_log("SPOOFTRACE go: %{public}@", log: OSLog.default, type: .default, String(line))
+                let lines = logs.split(separator: "\n").map(String.init)
+                for line in lines {
+                    os_log("SPOOFTRACE go: %{public}@", log: OSLog.default, type: .default, line)
                 }
+                self?.keepRecent(lines)
             }
         }
         t.resume()
@@ -153,6 +177,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let handler = completionHandler else { return }
         let cmd = String(data: messageData, encoding: .utf8) ?? ""
+        appMessages += 1
+        os_log("SPOOFTRACE app message #%{public}d %{public}@", log: OSLog.default, type: .default, appMessages, String(cmd.prefix(12)))
         switch cmd {
         case "getCoords":
             // 17 字节定长回包:1 字节 enabled + 8 字节 lat (LE) + 8 字节 lon (LE)。
@@ -173,12 +199,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         case "getLogs":
             // 拉取 Go 内部 handleLocationRequest 的逐次执行日志(诊断面板用)。
             // 回包为日志文本 UTF-8;无日志或 proxy 未起 → handler(nil)。
-            guard let proxy = goLocationSpoofer,
-                  let logs = proxy.drainGoLogs() else {
-                handler(nil)
-                return
+            var lines = takeRecent()
+            if let logs = goLocationSpoofer?.drainGoLogs() {
+                lines.append(contentsOf: logs.split(separator: "\n").map(String.init))
             }
-            handler(Data(logs.utf8))
+            let up = Int(Date().timeIntervalSince(startedAt))
+            let header = "tunnel alive: up \(up / 60)m\(up % 60)s, proxy \(goLocationSpoofer?.isRunning() == true ? "running" : "NOT running"), app messages \(appMessages)"
+            handler(Data(([header] + lines).joined(separator: "\n").utf8))
         case _ where cmd.hasPrefix("setCoords:"):
             // "setCoords:<1|0>:<lat>:<lon>" → switches coordinates live (no VPN restart,
             // so there is no gap in which iOS could reach Apple directly). Reply "OK" or "ERR:...".

@@ -351,6 +351,15 @@ struct MapHomeView: View {
             // back to the app the VPN may take a moment to answer: no answer is not a failure.
             queryGoCoordsWithRetry(tries: 4) { r in
                 guard let r else {
+                    if attempt == 0 {
+                        DiagLog.add("[resume] (\(reason)) VPN connected but not answering, reloading the VPN handle and checking again")
+                        VPNKeepAlive.refreshManager(reason: "resume") {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                                runCheckup(reason: reason, attempt: 1)
+                            }
+                        }
+                        return
+                    }
                     DiagLog.add("[resume] (\(reason)) VPN connected but not answering yet, leaving the spoof as is")
                     if case .on = spoofingState {} else { spoofingState = .on(name: name) }
                     VPNKeepAlive.update(wanted: true)
@@ -1200,7 +1209,9 @@ struct MapHomeView: View {
                 DispatchQueue.main.async {
                     guard let data = response else {
                         DiagLog.add("[IPC] response nil, vpn status=\(session.status.diagDesc)")
-                        completion(nil)
+                        // The VPN says "connected" but does not answer: reload the handle so
+                        // the next retry talks to the tunnel that is really running.
+                        VPNKeepAlive.refreshManager(reason: "no reply") { completion(nil) }
                         return
                     }
                     guard data.count == 17 else {

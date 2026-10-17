@@ -31,6 +31,17 @@ enum CacheShield {
     /// Asks the running tunnel to switch coordinates live.
     /// `enabled == false` puts the proxy in shield mode. completion(true) only on "OK".
     static func sendSetCoords(lat: Double, lon: Double, enabled: Bool, completion: @escaping (Bool) -> Void) {
+        sendSetCoordsOnce(lat: lat, lon: lon, enabled: enabled) { ok in
+            if ok { completion(true); return }
+            // No answer: the app may hold an outdated VPN handle. Reload it and try once more
+            // before the caller falls back to restarting the VPN (which leaves a short gap).
+            VPNKeepAlive.refreshManager(reason: "setCoords") {
+                sendSetCoordsOnce(lat: lat, lon: lon, enabled: enabled, completion: completion)
+            }
+        }
+    }
+
+    private static func sendSetCoordsOnce(lat: Double, lon: Double, enabled: Bool, completion: @escaping (Bool) -> Void) {
         guard let manager = ContentView.vpnManager,
               manager.connection.status == .connected,
               let session = manager.connection as? NETunnelProviderSession else {

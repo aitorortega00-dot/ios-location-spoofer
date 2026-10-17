@@ -75,6 +75,34 @@ enum VPNKeepAlive {
         }
     }
 
+    // MARK: - Refresh the VPN handle
+
+    private static var lastRefresh = Date.distantPast
+
+    /// Reloads the VPN configuration from iOS and keeps the one that is running.
+    /// Used when the VPN shows "connected" but does not answer the app: the app may be
+    /// holding an outdated handle (or a duplicate configuration) after iOS restarted it.
+    /// Throttled to once every 3 s. completion runs on the main thread.
+    static func refreshManager(reason: String, completion: (() -> Void)? = nil) {
+        guard Date().timeIntervalSince(lastRefresh) > 3 else {
+            DispatchQueue.main.async { completion?() }
+            return
+        }
+        lastRefresh = Date()
+        NETunnelProviderManager.loadAllFromPreferences { managers, error in
+            DispatchQueue.main.async {
+                let all = managers ?? []
+                let running = all.first { $0.connection.status == .connected }
+                    ?? all.first { $0.connection.status != .disconnected && $0.connection.status != .invalid }
+                if let chosen = running ?? all.first {
+                    ContentView.vpnManager = chosen
+                }
+                DiagLog.add("[ipc-fix] (\(reason)) reloaded VPN handle: \(all.count) config(s), using \(running != nil ? "the running one" : "the first one")\(error.map { ", error: \($0.localizedDescription)" } ?? "")")
+                completion?()
+            }
+        }
+    }
+
     // MARK: - Tunnel sleep/wake records
 
     private static let groupSuite = "group.dev.duti.location-spoofer"
