@@ -10,7 +10,4 @@
 
 #include "golocationspoofer.h"
 
-/// See LocationCachePurge.c. Jailbreak / TrollStore builds only.
-int lcp_purge_as_root(char *out, int outlen);
-
 #endif /* location_spoofer_tunnel_Bridging_Header_h */

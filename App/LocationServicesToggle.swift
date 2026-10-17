@@ -1,7 +1,6 @@
 import Foundation
 import CoreLocation
 import ObjectiveC
-import NetworkExtension
 
 /// Toggles system-wide Location Services through the private
 /// `+[CLLocationManager setLocationServicesEnabled:]` API.
@@ -102,81 +101,15 @@ enum LocationServicesToggle {
         }
         DiagLog.add("[LocToggle] Location Services OFF — waiting \(offSeconds)s")
 
-        // While services are off, clear the cached Wi-Fi positions so iOS has to ask
-        // the proxy again (replaces Settings › Reset Location & Privacy).
-        let offStart = Date()
-        let purged = await LocationCachePurge.run()
-        // locationd was killed: leave it at least 1 s to come back before turning on.
-        let remaining = max(purged ? 1.0 : 0, offSeconds - Date().timeIntervalSince(offStart))
-        try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+        try? await Task.sleep(nanoseconds: UInt64(offSeconds * 1_000_000_000))
 
         setEnabled(true)
-        guard await waitForState(true, timeout: 5.0) else {
+        guard await waitForState(true, timeout: 3.0) else {
             DiagLog.add("[LocToggle] Could not turn back ON — turn it on manually in Settings!")
             return false
         }
         let total = Date().timeIntervalSince(start)
         DiagLog.add(String(format: "[LocToggle] Location Services ON — cycle OK (%.1fs total)", total))
-        return true
-    }
-}
-
-/// Clears locationd's cached Wi-Fi access-point positions (jailbreak builds only).
-/// The work runs as root inside the tunnel extension (Tunnel/LocationCachePurge.c),
-/// so it only happens while the VPN is up. Never blocks the cycle: on failure it only logs.
-enum LocationCachePurge {
-    /// Returns true if at least one cache database was cleaned and locationd restarted.
-    @MainActor
-    static func run() async -> Bool {
-        let start = Date()
-        guard let session = ContentView.vpnManager?.connection as? NETunnelProviderSession,
-              session.status == .connected else {
-            DiagLog.add("[CachePurge] skipped — VPN not connected")
-            return false
-        }
-        let reply: String? = await withCheckedContinuation { cont in
-            let once = OnceFlag()
-            // Safety net: never wait more than 8 s for the tunnel.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-                if once.claim() { cont.resume(returning: nil) }
-            }
-            do {
-                try session.sendProviderMessage(Data("purgeCache".utf8)) { data in
-                    let text = data.flatMap { String(data: $0, encoding: .utf8) }
-                    DispatchQueue.main.async {
-                        if once.claim() { cont.resume(returning: text) }
-                    }
-                }
-            } catch {
-                DiagLog.add("[CachePurge] sendProviderMessage error: \(error.localizedDescription)")
-                if once.claim() { cont.resume(returning: nil) }
-            }
-        }
-        let ms = Int(Date().timeIntervalSince(start) * 1000)
-        guard let reply, reply.hasPrefix("RC:") else {
-            DiagLog.add("[CachePurge] FAILED — no answer from tunnel (\(ms) ms)")
-            return false
-        }
-        let lines = reply.split(separator: "\n")
-        let rc = Int(lines.first?.dropFirst(3) ?? "") ?? -99
-        for line in lines.dropFirst() {
-            DiagLog.add("[CachePurge] \(line)")
-        }
-        if rc == 0 {
-            DiagLog.add("[CachePurge] OK — Wi-Fi location cache cleared (\(ms) ms)")
-            return true
-        }
-        DiagLog.add("[CachePurge] FAILED (code \(rc), \(ms) ms) — use Settings › Reset Location & Privacy if the location drifts home")
-        return false
-    }
-}
-
-/// Lets exactly one of several racing callbacks resume a continuation (main thread only).
-private final class OnceFlag {
-    private var done = false
-    func claim() -> Bool {
-        if done { return false }
-        done = true
         return true
     }
 }

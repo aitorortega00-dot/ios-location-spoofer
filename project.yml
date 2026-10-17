@@ -86,7 +86,6 @@ targets:
         OTHER_LDFLAGS:
           - "$(inherited)"
           - "-lgolocationspoofer"
-          - "-lsqlite3"
         LIBRARY_SEARCH_PATHS:
           - "$(PROJECT_DIR)/GoSpoofer/build"
     dependencies:
