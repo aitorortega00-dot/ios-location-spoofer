@@ -1,6 +1,9 @@
 name: build-unsigned
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - 'claude/**'
 
 jobs:
   build:
