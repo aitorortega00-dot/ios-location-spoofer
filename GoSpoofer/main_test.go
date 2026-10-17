@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/hex"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	pb "golocationspoofer/pb"
@@ -163,4 +165,69 @@ func TestFieldPresence(t *testing.T) {
 	protoBytes3, _ := proto.Marshal(wloc3)
 	t.Logf("Without setting fields: %d bytes", len(protoBytes3))
 	t.Logf("Hex: %x", protoBytes3)
+}
+
+func TestCellTowerSpoof(t *testing.T) {
+	lat := IntFromCoord(40.4168)
+	lon := IntFromCoord(-3.7038)
+	mcc, mnc := uint32(214), uint32(7)
+	req := &pb.AppleWLoc{
+		WifiDevices:      []*pb.WifiDevice{{Bssid: "aa:bb:cc:dd:ee:ff"}},
+		CellTowerRequest: &pb.CellTower{Mcc: mcc, Mnc: mnc, CellId: 12345, TacId: 678},
+	}
+	payload, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, modified := rewriteAppleWLocCoords(payload, lat, lon)
+	if modified == 0 {
+		t.Fatal("nothing modified")
+	}
+	resp := &pb.AppleWLoc{}
+	if err := proto.Unmarshal(out, resp); err != nil {
+		t.Fatalf("rewritten payload does not parse: %v", err)
+	}
+	if len(resp.CellTowerResponse) != 1 {
+		t.Fatalf("want 1 cell tower response, got %d", len(resp.CellTowerResponse))
+	}
+	ct := resp.CellTowerResponse[0]
+	if ct.CellId != 12345 || ct.Mcc != mcc || ct.Location.GetLatitude() != lat || ct.Location.GetLongitude() != lon || ct.Location.GetHorizontalAccuracy() != cellAccuracy {
+		t.Fatalf("bad cell tower: %+v loc=%+v", ct, ct.Location)
+	}
+	if resp.WifiDevices[0].Location.GetLatitude() != lat || resp.WifiDevices[0].Location.GetHorizontalAccuracy() != 30 {
+		t.Fatalf("wifi not spoofed: %+v", resp.WifiDevices[0].Location)
+	}
+	if resp.CellTowerRequest == nil || resp.CellTowerRequest.CellId != 12345 {
+		t.Fatal("cell tower request not kept")
+	}
+
+	// A response-style entry (tag 22) with a real location gets overwritten.
+	real := &pb.AppleWLoc{CellTowerResponse: []*pb.CellTower{{CellId: 1, Location: &pb.Location{Latitude: proto.Int64(1), Longitude: proto.Int64(2), HorizontalAccuracy: proto.Int64(500)}}}}
+	payload, _ = proto.Marshal(real)
+	out, _ = rewriteAppleWLocCoords(payload, lat, lon)
+	resp = &pb.AppleWLoc{}
+	if err := proto.Unmarshal(out, resp); err != nil {
+		t.Fatal(err)
+	}
+	l := resp.CellTowerResponse[0].Location
+	if l.GetLatitude() != lat || l.GetLongitude() != lon || l.GetHorizontalAccuracy() != 500 {
+		t.Fatalf("existing cell location not rewritten: %+v", l)
+	}
+}
+
+func TestShieldBlocksWhenSpoofOff(t *testing.T) {
+	setSpoof(0, 0, false)
+	req := httptest.NewRequest("POST", "https://gs-loc.apple.com/clls/wloc", strings.NewReader("x"))
+	_, resp := handleLocationRequest(req)
+	if resp == nil || resp.StatusCode != 503 {
+		t.Fatalf("expected blocked 503 response, got %+v", resp)
+	}
+	// Garbage while spoofing is on is blocked too (never forwarded to Apple).
+	setSpoof(40.4, -3.7, true)
+	req = httptest.NewRequest("POST", "https://gs-loc.apple.com/clls/wloc", strings.NewReader("garbage"))
+	_, resp = handleLocationRequest(req)
+	if resp == nil || resp.StatusCode != 503 {
+		t.Fatalf("expected blocked 503 for unparsable body, got %+v", resp)
+	}
+	setSpoof(0, 0, false)
 }

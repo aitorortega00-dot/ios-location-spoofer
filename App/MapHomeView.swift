@@ -128,6 +128,8 @@ struct MapHomeView: View {
     @State private var isSpoofing: Bool = false
     @StateObject private var locationFetcher = LocationFetcher()
     @StateObject private var searchCompleter = SearchCompleterHelper()
+    @StateObject private var health = SpoofHealthMonitor()
+    @State private var showCacheHelp = false
     @State private var spoofedDisplayCoord: CLLocationCoordinate2D? = nil
     @State private var lastKnownUserCoord: CLLocationCoordinate2D? = nil
     @State private var realUserCoord: CLLocationCoordinate2D? = nil
@@ -188,7 +190,9 @@ struct MapHomeView: View {
                 disableSpoofing()
             }
         } message: {
-            Text("Spoofing will be disabled. After disabling, restart Location Services once for your real location to return.")
+            Text(CacheShield.isEnabled
+                 ? "Spoofing will be disabled. The cache shield keeps the VPN on so your home Wi-Fi positions are not cached (no need to reset Location & Privacy next time)."
+                 : "Spoofing will be disabled. After disabling, restart Location Services once for your real location to return.")
         }
         .sheet(isPresented: $showRestartPhoneGuide) {
             disableRestartGuide
@@ -199,6 +203,14 @@ struct MapHomeView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .alert("Location pulled back by cached Wi-Fi", isPresented: $showCacheHelp) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("iOS is using real Wi-Fi positions it saved earlier.\n\n1. Tap Reapply.\n2. If it keeps happening: turn the VPN off, then Settings › General › Transfer or Reset iPhone › Reset › Reset Location & Privacy, and set the location again.\n\nWith the cache shield on, this should not come back.")
+        }
+        .onChange(of: spoofingState) { newState in
+            updateHealthMonitor(newState)
         }
         .onAppear {
             refreshVPNStatus()
@@ -228,7 +240,79 @@ struct MapHomeView: View {
             NotificationCenter.default.addObserver(forName: .NEVPNStatusDidChange, object: nil, queue: .main) { _ in
                 refreshVPNStatus()
             }
+            updateHealthMonitor(spoofingState)
+            // The VPN manager loads asynchronously (ContentView): re-check the real state shortly
+            // after launch, fix the status card, and bring the cache shield back up if needed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                refreshVPNStatus()
+                let name = UserDefaults.standard.string(forKey: "currentLocationName") ?? ""
+                if case .off = spoofingState, vpnConnected, !name.isEmpty,
+                   LocationConfiguration.shared.currentCoordinates != nil {
+                    spoofingState = .on(name: name)
+                }
+                CacheShield.ensureRunningIfIdle(isSpoofingOff: {
+                    if case .off = spoofingState { return true }
+                    return false
+                }) { _ in
+                    refreshVPNStatus()
+                }
+            }
         }
+    }
+
+    private func updateHealthMonitor(_ state: SpoofingState) {
+        if case .on = state, let c = LocationConfiguration.shared.currentCoordinates {
+            health.start(target: CLLocationCoordinate2D(latitude: c.latitude, longitude: c.longitude))
+        } else {
+            health.stop()
+        }
+    }
+
+    /// Re-runs the Location Services restart with the current coordinates.
+    private func reapplySpoof() {
+        DiagLog.add("[health] Reapply tapped")
+        health.reset()
+        showRestartLocationGuide = true
+    }
+
+    /// Warning shown under the status when the location escapes while spoofing.
+    @ViewBuilder
+    private var healthBanner: some View {
+        if case .on = spoofingState, let issue = health.issue {
+            VStack(alignment: .leading, spacing: 8) {
+                switch issue {
+                case .gps(let d):
+                    Label("Real GPS signal (\(formatDistance(d)) away)", systemImage: "antenna.radiowaves.left.and.right")
+                        .font(.subheadline).fontWeight(.semibold)
+                        .foregroundColor(.orange)
+                    Text("Your iPhone picked up satellites. Move away from windows; the app can't block GPS.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                case .cache(let d):
+                    Label("Cached Wi-Fi data (\(formatDistance(d)) away)", systemImage: "wifi.exclamationmark")
+                        .font(.subheadline).fontWeight(.semibold)
+                        .foregroundColor(.orange)
+                    Text("iOS is using real Wi-Fi positions saved earlier.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    HStack(spacing: 10) {
+                        Button("Reapply") { reapplySpoof() }
+                            .buttonStyle(.borderedProminent)
+                        Button("How to fix") { showCacheHelp = true }
+                            .buttonStyle(.bordered)
+                    }
+                    .font(.subheadline)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(Color.orange.opacity(0.12))
+            .cornerRadius(12)
+        }
+    }
+
+    private func formatDistance(_ meters: Double) -> String {
+        meters >= 1000 ? String(format: "%.1f km", meters / 1000) : "\(Int(meters)) m"
     }
     // MARK: - 子视图
 
@@ -301,6 +385,8 @@ struct MapHomeView: View {
                 Spacer()
             }
 
+            healthBanner
+
             if case .on = spoofingState {
                 Button(action: { showDisableGuide = true }) {
                     Text("Disable")
@@ -340,6 +426,9 @@ struct MapHomeView: View {
 
     private var statusSubText: String? {
         if case .pending = spoofingState { return "Please restart Location Services" }
+        if case .off = spoofingState, vpnConnected, CacheShield.isEnabled {
+            return "Cache shield on: home Wi-Fi positions are not being cached"
+        }
         return nil
     }
     private var indicatorColor: Color {
@@ -771,7 +860,22 @@ struct MapHomeView: View {
             // VPN 已连:无感重启 tunnel,让 Network Extension 重读新坐标。
             // 临时观察者驱动 stop→等disconnect→start→等connect 两阶段状态机,8 秒超时。
             showLocationSheet = false
-            restartVPNForNewCoordinates(expectedLat: converted.latitude, expectedLon: converted.longitude)
+            // First try switching the running proxy live (no VPN restart → no moment in which
+            // iOS can reach Apple and cache real positions). Falls back to the restart.
+            CacheShield.sendSetCoords(lat: converted.latitude, lon: converted.longitude, enabled: true) { ok in
+                guard ok else {
+                    DiagLog.add("[live] falling back to VPN restart")
+                    restartVPNForNewCoordinates(expectedLat: converted.latitude, expectedLon: converted.longitude)
+                    return
+                }
+                confirmCoordsReady(expectedLat: converted.latitude, expectedLon: converted.longitude, timeout: 5) { matched in
+                    DiagLog.add("[live] coords \(matched ? "confirmed" : "not confirmed, continuing anyway"), showing restart tutorial")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        showRestartLocationGuide = true
+                        isSpoofing = false
+                    }
+                }
+            }
         }
     }
 
@@ -1146,19 +1250,36 @@ struct MapHomeView: View {
         // 进入 pending(关闭中)
         spoofingState = .pending(name: oldName, isClosing: true)
 
-        // 关 VPN
-        if let manager = ContentView.vpnManager {
-            manager.connection.stopVPNTunnel()
-        }
         // 清坐标
         LocationConfiguration.shared.clearCoordinates()
         UserDefaults.standard.removeObject(forKey: "currentLocationName")
         currentLocationName = ""
         lastKnownUserCoord = realUserCoord  // 关闭伪装后,"回到我的位置"恢复跳真实坐标
 
-        // 弹出"请重启定位服务"教学
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            showRestartPhoneGuide = true
+        let showGuide = {
+            // 弹出"请重启定位服务"教学
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                showRestartPhoneGuide = true
+            }
+        }
+
+        guard CacheShield.isEnabled else {
+            // 关 VPN
+            if let manager = ContentView.vpnManager {
+                manager.connection.stopVPNTunnel()
+            }
+            showGuide()
+            return
+        }
+
+        // Cache shield: keep the VPN on without coordinates. Live switch first (no gap);
+        // otherwise restart the tunnel so it re-reads the cleared coordinates.
+        CacheShield.sendSetCoords(lat: 0, lon: 0, enabled: false) { ok in
+            if ok {
+                showGuide()
+            } else {
+                CacheShield.startOrRestart { _ in showGuide() }
+            }
         }
     }
 

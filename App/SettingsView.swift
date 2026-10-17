@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var showResetConfirm = false
     @State private var showCopiedToast = false
     @ObservedObject private var diagLog = DiagLog.shared
+    @State private var shieldOn = CacheShield.isEnabled
 
     var body: some View {
         NavigationView {
@@ -24,6 +25,25 @@ struct SettingsView: View {
                         Text(appVersion)
                             .foregroundColor(.secondary)
                     }
+                }
+
+                Section {
+                    Toggle("Cache shield", isOn: $shieldOn)
+                        .onChange(of: shieldOn) { on in
+                            CacheShield.isEnabled = on
+                            DiagLog.add("[shield] Settings toggle → \(on ? "on" : "off")")
+                            if on {
+                                CacheShield.ensureRunningIfIdle(isSpoofingOff: {
+                                    LocationConfiguration.shared.currentCoordinates == nil
+                                }) { _ in }
+                            } else {
+                                CacheShield.stopIfIdle()
+                            }
+                        }
+                } header: {
+                    Text("Wi-Fi cache")
+                } footer: {
+                    Text("Keeps the VPN on while spoofing is off and blocks Apple's Wi-Fi location lookups, so iOS stops caching your real Wi-Fi positions (the cause of the big grey circle pulling you home). Your real location still works through GPS and cell towers, a bit less precisely indoors. Turn off to get the old behaviour (VPN fully off).")
                 }
 
                 // 诊断信息

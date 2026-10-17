@@ -177,6 +177,21 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
             handler(Data(logs.utf8))
+        case _ where cmd.hasPrefix("setCoords:"):
+            // "setCoords:<1|0>:<lat>:<lon>" → switches coordinates live (no VPN restart,
+            // so there is no gap in which iOS could reach Apple directly). Reply "OK" or "ERR:...".
+            let parts = cmd.split(separator: ":")
+            guard parts.count == 4, let lat = Double(parts[2]), let lon = Double(parts[3]) else {
+                handler(Data("ERR:bad-format".utf8))
+                return
+            }
+            let enabled = parts[1] == "1"
+            guard let proxy = goLocationSpoofer, proxy.setCoords(lat: lat, lon: lon, enabled: enabled) else {
+                handler(Data("ERR:proxy-not-running".utf8))
+                return
+            }
+            os_log("SPOOFTRACE setCoords enabled=%{public}d lat=%{public}f lon=%{public}f", log: OSLog.default, type: .default, enabled ? 1 : 0, lat, lon)
+            handler(Data("OK".utf8))
         default:
             // 未知命令保持原 echo 行为,兼容潜在旧调用方
             handler(messageData)

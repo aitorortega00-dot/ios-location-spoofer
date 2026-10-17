@@ -23,8 +23,8 @@ import (
 
 	"github.com/elazarl/goproxy"
 	pb "golocationspoofer/pb"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 //#cgo CFLAGS: -DGOOS_ios -DNDEBUG
@@ -36,6 +36,22 @@ var globalCACert *tls.Certificate
 var spoofLat float64 = 0.0
 var spoofLon float64 = 0.0
 var spoofingEnabled bool = false
+
+// coordsMu guards spoofLat/spoofLon/spoofingEnabled: since coordinates can now be
+// changed live (golocationspoofer_setcoords) while requests are being served.
+var coordsMu sync.RWMutex
+
+func getSpoof() (lat, lon float64, enabled bool) {
+	coordsMu.RLock()
+	defer coordsMu.RUnlock()
+	return spoofLat, spoofLon, spoofingEnabled
+}
+
+func setSpoof(lat, lon float64, enabled bool) {
+	coordsMu.Lock()
+	spoofLat, spoofLon, spoofingEnabled = lat, lon, enabled
+	coordsMu.Unlock()
+}
 
 // 诊断日志环形缓冲:最近 maxLogEntries 条 logEvent 调用,带时间戳。
 // drainlogs 导出函数返回缓冲内容(C 串)给 Tunnel→App 诊断面板,clear 缓冲。
@@ -143,9 +159,7 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 		}
 	}()
 
-	spoofLat = float64(lat)
-	spoofLon = float64(lon)
-	spoofingEnabled = enabled != 0
+	setSpoof(float64(lat), float64(lon), enabled != 0)
 
 	if certData != nil && keyData != nil {
 		certPEM := C.GoString(certData)
@@ -157,7 +171,7 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 			return 0
 		}
 		globalCACert = parsedCert
-		log.Printf("Location spoofer: MITM enabled, coordinates: %.6f, %.6f", spoofLat, spoofLon)
+		log.Printf("Location spoofer: MITM enabled")
 	}
 
 	proxy := goproxy.NewProxyHttpServer()
@@ -169,9 +183,9 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 		setupCertServing(proxy, globalCACert)
 	}
 
-	if spoofingEnabled {
-		setupLocationSpoofing(proxy)
-	}
+	// Always installed: the handler itself checks whether spoofing is on, so the
+	// coordinates can be switched live (setcoords) without restarting the VPN.
+	setupLocationSpoofing(proxy)
 
 	srv := &http.Server{
 		Addr:    "127.0.0.1:8888",
@@ -190,7 +204,8 @@ func golocationspoofer_startproxy(certData *C.char, keyData *C.char, lat C.doubl
 		}
 	}()
 
-	logEvent(fmt.Sprintf("Proxy started on 127.0.0.1:8888 mitm=%v spoofing=%v lat=%.6f lon=%.6f", globalCACert != nil, spoofingEnabled, spoofLat, spoofLon))
+	sLat, sLon, sOn := getSpoof()
+	logEvent(fmt.Sprintf("Proxy started on 127.0.0.1:8888 mitm=%v spoofing=%v lat=%.6f lon=%.6f", globalCACert != nil, sOn, sLat, sLon))
 	return C.uintptr_t(h)
 }
 
@@ -216,11 +231,22 @@ func golocationspoofer_stopproxy(h C.uintptr_t) C.int {
 
 //export golocationspoofer_getcoords
 func golocationspoofer_getcoords() (lat, lon C.double, enabled C.int) {
+	sLat, sLon, sOn := getSpoof()
 	var e C.int = 0
-	if spoofingEnabled {
+	if sOn {
 		e = 1
 	}
-	return C.double(spoofLat), C.double(spoofLon), e
+	return C.double(sLat), C.double(sLon), e
+}
+
+// golocationspoofer_setcoords changes the spoof coordinates of the running proxy
+// without restarting the VPN (no gap in which iOS could reach Apple directly).
+// enabled=0 switches to shield mode (gs-loc blocked).
+//
+//export golocationspoofer_setcoords
+func golocationspoofer_setcoords(lat, lon C.double, enabled C.int) {
+	setSpoof(float64(lat), float64(lon), enabled != 0)
+	logEvent(fmt.Sprintf("Coords changed live: spoofing=%v lat=%.6f lon=%.6f", enabled != 0, float64(lat), float64(lon)))
 }
 
 func setupMITM(proxy *goproxy.ProxyHttpServer, cert *tls.Certificate) {
@@ -237,6 +263,13 @@ func setupMITM(proxy *goproxy.ProxyHttpServer, cert *tls.Certificate) {
 		// posiciones reales de APs y saltan el spoof de gs-loc.
 		if strings.HasPrefix(hostname, "gspe") && strings.HasSuffix(hostname, "-ssl.ls.apple.com") {
 			logEvent("BLOCKED location data host=" + host)
+			return goproxy.RejectConnect, host
+		}
+		// Modo escudo: el tunel corre sin coordenadas (spoof desactivado). Se bloquea
+		// gs-loc para que iOS no reciba ni guarde en cache las posiciones reales de
+		// los Wi-Fi cercanos (las de casa). La ubicacion real sigue por GPS/antenas.
+		if _, _, on := getSpoof(); isLoc && !on {
+			logEvent("SHIELD blocked loc host=" + host)
 			return goproxy.RejectConnect, host
 		}
 		if isLoc {
@@ -328,19 +361,27 @@ func handleLocationRequest(req *http.Request) (*http.Request, *http.Response) {
 
 	logEvent(fmt.Sprintf("Location request received Host=%s Path=%s Method=%s", req.Host, req.URL.Path, req.Method))
 
+	curLat, curLon, on := getSpoof()
+	if !on {
+		// Spoofing was switched off live on a connection opened earlier: shield mode.
+		req.Body.Close()
+		logEvent("SHIELD blocked location request (spoofing off)")
+		return req, blockedLocResponse(req)
+	}
+
 	body, err := io.ReadAll(req.Body)
 	req.Body.Close()
 	if err != nil {
 		log.Printf("Failed to read request body: %v", err)
-		logEvent(fmt.Sprintf("Failed to read request body: %v, passing through", err))
-		return req, nil
+		logEvent(fmt.Sprintf("Failed to read request body: %v, BLOCKED (not sent to Apple)", err))
+		return req, blockedLocResponse(req)
 	}
 	logEvent(fmt.Sprintf("Request body read length=%d bytes", len(body)))
 
 	arpc := ArpcDeserialize(body)
 	if arpc == nil {
-		logEvent("ArpcDeserialize returned nil (possibly gzip/version mismatch), passing through")
-		return req, nil
+		logEvent("ArpcDeserialize returned nil (possibly gzip/version mismatch), BLOCKED (not sent to Apple)")
+		return req, blockedLocResponse(req)
 	}
 	logEvent(fmt.Sprintf("ARPC parsed OK version=%s payloadLen=%d", arpc.Version, len(arpc.Payload)))
 
@@ -348,20 +389,29 @@ func handleLocationRequest(req *http.Request) (*http.Request, *http.Response) {
 	wloc := &pb.AppleWLoc{}
 	if err := proto.Unmarshal(arpc.Payload, wloc); err != nil {
 		log.Printf("Failed to unmarshal protobuf: %v", err)
-		logEvent(fmt.Sprintf("protobuf Unmarshal failed: %v, passing through", err))
-		return req, nil
+		logEvent(fmt.Sprintf("protobuf Unmarshal failed: %v, BLOCKED (not sent to Apple)", err))
+		return req, blockedLocResponse(req)
 	}
 
 	wifiCount := len(wloc.WifiDevices)
+	cellCount := len(wloc.CellTowerResponse)
+	if wloc.CellTowerRequest != nil {
+		cellCount++
+	}
 	log.Printf("Spoofing location for %d WiFi devices", wifiCount)
-	logEvent(fmt.Sprintf("AppleWLoc parsed wifiCount=%d", wifiCount))
+	logEvent(fmt.Sprintf("AppleWLoc parsed wifiCount=%d cellCount=%d", wifiCount, cellCount))
 
 	// raw wire 递归 splice:只动 Location.Latitude(tag 1 varint)/Longitude(tag 2 varint)的字节,
 	// 其他所有字段(HorizontalAccuracy/Altitude/未知 tag/NumCellResults/DeviceType 等)wire 字节级保留。
-	lat := IntFromCoord(spoofLat)
-	lon := IntFromCoord(spoofLon)
+	lat := IntFromCoord(curLat)
+	lon := IntFromCoord(curLon)
 	newPayload, modifiedFields := rewriteAppleWLocCoords(arpc.Payload, lat, lon)
-	logEvent(fmt.Sprintf("raw wire rewrite done in=%d B out=%d B modified %d lat/lon fields (spoof=(%.6f, %.6f))", len(arpc.Payload), len(newPayload), modifiedFields, spoofLat, spoofLon))
+	logEvent(fmt.Sprintf("raw wire rewrite done in=%d B out=%d B modified %d lat/lon fields (spoof=(%.6f, %.6f))", len(arpc.Payload), len(newPayload), modifiedFields, curLat, curLon))
+	if len(newPayload) > 0xFFFF {
+		// The ARPC length prefix is 2 bytes; never send a truncated/corrupt answer.
+		logEvent(fmt.Sprintf("response too large (%d B), BLOCKED", len(newPayload)))
+		return req, blockedLocResponse(req)
+	}
 
 	// 手工构造 ARPC 响应:magic 8B + 大端 2B 长度 + payload
 	initialBytes, _ := hex.DecodeString("0001000000010000")
@@ -384,6 +434,12 @@ func handleLocationRequest(req *http.Request) (*http.Request, *http.Response) {
 	resp.Header.Set("Content-Type", "application/octet-stream")
 	logEvent(fmt.Sprintf("Response sent 200 OK respLen=%d wifiCount=%d", len(responseBytes), wifiCount))
 	return req, resp
+}
+
+// blockedLocResponse answers a location request with an error instead of
+// forwarding it to Apple, so real positions never reach (and get cached by) iOS.
+func blockedLocResponse(req *http.Request) *http.Response {
+	return goproxy.NewResponse(req, "text/plain", http.StatusServiceUnavailable, "")
 }
 
 func generateCA() (certPEM, keyPEM []byte, err error) {
@@ -462,6 +518,7 @@ func SerializeProto(p proto.Message, initial []byte) ([]byte, error) {
 }
 
 func main() {}
+
 // rewriteAppleWLocCoords 在 AppleWLoc 原始 wire bytes 上扫描所有 WifiDevices(tag=2 LEN),
 // 对每个 WifiDevice 递归调用 rewriteWifiDevice 把 lat/lon 改成 spoof 坐标。
 // 其他顶层字段(NumCellResults/CellTowerResponse/DeviceType/未知 tag 等)wire 字节级原样保留。
@@ -484,6 +541,30 @@ func rewriteAppleWLocCoords(payload []byte, lat, lon int64) ([]byte, int) {
 			modified += sub
 			out = protowire.AppendTag(out, 2, protowire.BytesType)
 			out = protowire.AppendBytes(out, newWd)
+			b = b[tagLen+valLen:]
+		} else if num == 22 && typ == protowire.BytesType {
+			// CellTowerResponse (antenas): la misma ubicacion falsa, con precision de antena.
+			ctBytes, valLen := protowire.ConsumeBytes(b[tagLen:])
+			if valLen < 0 {
+				return payload, modified
+			}
+			newCt, sub := rewriteCellTower(ctBytes, lat, lon)
+			modified += sub
+			out = protowire.AppendTag(out, 22, protowire.BytesType)
+			out = protowire.AppendBytes(out, newCt)
+			b = b[tagLen+valLen:]
+		} else if num == 25 && typ == protowire.BytesType {
+			// CellTowerRequest: la antena a la que esta conectado el movil. Se deja tal cual
+			// y se anade su respuesta (tag 22) con la ubicacion falsa, como haria Apple.
+			ctBytes, valLen := protowire.ConsumeBytes(b[tagLen:])
+			if valLen < 0 {
+				return payload, modified
+			}
+			out = append(out, b[:tagLen+valLen]...)
+			newCt, sub := rewriteCellTower(ctBytes, lat, lon)
+			modified += sub
+			out = protowire.AppendTag(out, 22, protowire.BytesType)
+			out = protowire.AppendBytes(out, newCt)
 			b = b[tagLen+valLen:]
 		} else {
 			n := protowire.ConsumeFieldValue(num, typ, b[tagLen:])
@@ -538,8 +619,59 @@ func rewriteWifiDevice(wd []byte, lat, lon int64) ([]byte, int) {
 		loc = protowire.AppendTag(loc, 2, protowire.VarintType)
 		loc = protowire.AppendVarint(loc, uint64(lon))
 		loc = protowire.AppendTag(loc, 3, protowire.VarintType)
-  		loc = protowire.AppendVarint(loc, 30)
+		loc = protowire.AppendVarint(loc, 30)
 		out = protowire.AppendTag(out, 2, protowire.BytesType)
+		out = protowire.AppendBytes(out, loc)
+		modified += 3
+	}
+	return out, modified
+}
+
+// cellAccuracy is the accuracy (metres) reported for spoofed cell towers.
+const cellAccuracy = 1000
+
+// rewriteCellTower sets the Location (tag 5) of a CellTower message to the spoof
+// coordinates, injecting it (with a cell-sized accuracy) when missing.
+// Every other field (mcc/mnc/cell id/tac...) is kept byte for byte.
+func rewriteCellTower(ct []byte, lat, lon int64) ([]byte, int) {
+	out := make([]byte, 0, len(ct)+24)
+	modified := 0
+	locationSeen := false
+	b := ct
+	for len(b) > 0 {
+		num, typ, tagLen := protowire.ConsumeTag(b)
+		if tagLen < 0 {
+			return ct, modified
+		}
+		if num == 5 && typ == protowire.BytesType {
+			locationSeen = true
+			locBytes, valLen := protowire.ConsumeBytes(b[tagLen:])
+			if valLen < 0 {
+				return ct, modified
+			}
+			newLoc, sub := rewriteLocation(locBytes, lat, lon)
+			modified += sub
+			out = protowire.AppendTag(out, 5, protowire.BytesType)
+			out = protowire.AppendBytes(out, newLoc)
+			b = b[tagLen+valLen:]
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, b[tagLen:])
+			if n < 0 {
+				return ct, modified
+			}
+			out = append(out, b[:tagLen+n]...)
+			b = b[tagLen+n:]
+		}
+	}
+	if !locationSeen {
+		var loc []byte
+		loc = protowire.AppendTag(loc, 1, protowire.VarintType)
+		loc = protowire.AppendVarint(loc, uint64(lat))
+		loc = protowire.AppendTag(loc, 2, protowire.VarintType)
+		loc = protowire.AppendVarint(loc, uint64(lon))
+		loc = protowire.AppendTag(loc, 3, protowire.VarintType)
+		loc = protowire.AppendVarint(loc, cellAccuracy)
+		out = protowire.AppendTag(out, 5, protowire.BytesType)
 		out = protowire.AppendBytes(out, loc)
 		modified += 3
 	}
