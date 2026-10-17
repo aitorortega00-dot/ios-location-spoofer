@@ -325,7 +325,7 @@ struct MapHomeView: View {
     /// - spoof saved but VPN down (iOS stopped it while locked, reboot…) → bring it back
     /// - VPN up but the proxy has other coordinates → switch them live and reapply
     /// - nothing to spoof and shield on but VPN down → start the shield
-    private func runCheckup(reason: String) {
+    private func runCheckup(reason: String, attempt: Int = 0) {
         refreshVPNStatus()
         VPNKeepAlive.collectTunnelEvents()
         // Never interfere with a flow already in progress.
@@ -347,8 +347,16 @@ struct MapHomeView: View {
         guard let manager = ContentView.vpnManager else { return }
         switch manager.connection.status {
         case .connected:
-            queryGoCoordsViaIPC { r in
-                if let r, r.enabled, abs(r.lat - c.latitude) < 1e-5, abs(r.lon - c.longitude) < 1e-5 {
+            // Only repair when the VPN clearly answers with something wrong. Right after coming
+            // back to the app the VPN may take a moment to answer: no answer is not a failure.
+            queryGoCoordsWithRetry(tries: 4) { r in
+                guard let r else {
+                    DiagLog.add("[resume] (\(reason)) VPN connected but not answering yet, leaving the spoof as is")
+                    if case .on = spoofingState {} else { spoofingState = .on(name: name) }
+                    VPNKeepAlive.update(wanted: true)
+                    return
+                }
+                if r.enabled, abs(r.lat - c.latitude) < 1e-5, abs(r.lon - c.longitude) < 1e-5 {
                     if case .on = spoofingState {} else {
                         DiagLog.add("[resume] (\(reason)) spoof still active in the VPN, status card restored")
                         spoofingState = .on(name: name)
@@ -356,7 +364,7 @@ struct MapHomeView: View {
                     VPNKeepAlive.update(wanted: true)
                     return
                 }
-                DiagLog.add("[resume] (\(reason)) VPN up but proxy not serving the spoof (\(r == nil ? "no reply" : "enabled=\(r!.enabled)")), fixing")
+                DiagLog.add("[resume] (\(reason)) VPN up but proxy not serving the spoof (enabled=\(r.enabled)), fixing")
                 CacheShield.sendSetCoords(lat: c.latitude, lon: c.longitude, enabled: true) { ok in
                     if ok {
                         showResumeBanner("Spoof restored after the VPN was interrupted")
@@ -370,9 +378,33 @@ struct MapHomeView: View {
         case .connecting, .reasserting:
             // Auto-reconnect is bringing it back; check again in a moment.
             DiagLog.add("[resume] (\(reason)) VPN is reconnecting, checking again in 3s")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { runCheckup(reason: reason) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { runCheckup(reason: reason, attempt: attempt) }
         default:
+            // The status iOS reports right after returning to the app can be stale.
+            // Reload it and look twice before treating the VPN as stopped.
+            if attempt < 2 {
+                DiagLog.add("[resume] (\(reason)) VPN looks down (\(manager.connection.status.rawValue)), re-checking")
+                manager.loadFromPreferences { _ in
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        runCheckup(reason: reason, attempt: attempt + 1)
+                    }
+                }
+                return
+            }
             resumeSpoof(name: name, coords: c, reason: reason)
+        }
+    }
+
+    /// Asks the VPN for its coordinates, retrying a few times when it does not answer.
+    private func queryGoCoordsWithRetry(tries: Int, completion: @escaping ((lat: Double, lon: Double, enabled: Bool)?) -> Void) {
+        queryGoCoordsViaIPC { r in
+            if r != nil || tries <= 1 {
+                completion(r)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                    queryGoCoordsWithRetry(tries: tries - 1, completion: completion)
+                }
+            }
         }
     }
 
