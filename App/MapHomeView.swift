@@ -248,14 +248,77 @@ struct MapHomeView: View {
             // after launch, fix the status card, and bring the cache shield back up if needed.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                 checkupDone = true
-                runCheckup(reason: "launch")
+                clipboardThenCheckup(reason: "launch")
             }
         }
         .onChange(of: scenePhase) { phase in
             // Back from the background / lock screen: make sure the spoof is still being served.
             guard phase == .active, checkupDone else { return }
-            runCheckup(reason: "foreground")
+            clipboardThenCheckup(reason: "foreground")
         }
+    }
+
+    /// On launch / back to the app: if the user copied new coordinates, set them right away;
+    /// otherwise run the usual checkup.
+    private func clipboardThenCheckup(reason: String) {
+        let busy: Bool = {
+            if case .pending = spoofingState { return true }
+            return isSpoofing || showRestartLocationGuide || showRestartPhoneGuide
+        }()
+        if !busy, let coord = ClipboardCoords.takeNew() {
+            applyFromClipboard(coord, attempt: 0)
+            return
+        }
+        runCheckup(reason: reason)
+    }
+
+    private func applyFromClipboard(_ coord: CLLocationCoordinate2D, attempt: Int) {
+        refreshVPNStatus()
+        // Same place as the active spoof: nothing to do.
+        if case .on = spoofingState, let c = LocationConfiguration.shared.currentCoordinates,
+           abs(c.latitude - coord.latitude) < 1e-5, abs(c.longitude - coord.longitude) < 1e-5 {
+            DiagLog.add("[clipboard] same coordinates as the active spoof, nothing to do")
+            showResumeBanner("Copied location is already active")
+            runCheckup(reason: "clipboard")
+            return
+        }
+        // The VPN is coming back by itself: wait for it instead of starting a second connection.
+        if let status = ContentView.vpnManager?.connection.status,
+           status == .connecting || status == .reasserting || status == .disconnecting, attempt < 4 {
+            DiagLog.add("[clipboard] VPN busy (\(status.rawValue)), retrying in 2s")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { applyFromClipboard(coord, attempt: attempt + 1) }
+            return
+        }
+        // Close any open sheet so the final step can be shown.
+        showLocationSheet = false
+        showFavoritesSheet = false
+        showSettings = false
+
+        let fallbackName = String(format: "Pasted %.5f, %.5f", coord.latitude, coord.longitude)
+        var done = false
+        func go(_ name: String) {
+            guard !done else { return }
+            done = true
+            DiagLog.add("[clipboard] setting location: \(name)")
+            selectedCoordinate = coord
+            selectedLocationName = name
+            withAnimation {
+                cameraPosition = .region(MKCoordinateRegion(
+                    center: coord,
+                    span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                ))
+            }
+            showResumeBanner("Location set from clipboard")
+            setAsLocation()
+        }
+        // Try to get a readable name (max 2.5 s); otherwise use the coordinates as the name.
+        CLGeocoder().reverseGeocodeLocation(CLLocation(latitude: coord.latitude, longitude: coord.longitude)) { placemarks, _ in
+            let name = placemarks?.first.map { p in
+                [p.name, p.locality, p.country].compactMap { $0 }.joined(separator: ", ")
+            } ?? ""
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { go(name.isEmpty ? fallbackName : name) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { go(fallbackName) }
     }
 
     /// Checks that what the app thinks is running is really running, and repairs it:
@@ -474,6 +537,10 @@ struct MapHomeView: View {
                 Spacer()
             }
 
+            if case .on = spoofingState, SpoofTimer.startDate != nil {
+                spoofCountdown
+            }
+
             healthBanner
 
             if case .on = spoofingState {
@@ -501,6 +568,33 @@ struct MapHomeView: View {
             }
         }
         .padding(.horizontal, 16)
+    }
+
+    /// "Wait 2:41" countdown after each successful spoof (Settings → countdown length).
+    private var spoofCountdown: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if let left = SpoofTimer.remaining(at: context.date) {
+                let total = Double(SpoofTimer.minutes * 60)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: left > 0 ? "timer" : "checkmark.circle.fill")
+                        Text(left > 0
+                             ? "Slower apps: wait \(SpoofTimer.format(left))"
+                             : "\(SpoofTimer.minutes) min passed: slower apps should have it")
+                            .monospacedDigit()
+                        Spacer()
+                    }
+                    .font(.subheadline)
+                    .foregroundColor(left > 0 ? .primary : .green)
+                    if left > 0 {
+                        ProgressView(value: total - left, total: total)
+                    }
+                }
+                .padding(12)
+                .background(Color(UIColor.tertiarySystemBackground).opacity(0.6))
+                .cornerRadius(12)
+            }
+        }
     }
 
     // 状态文案(MapHomeView 内重写,不动 SpoofingState.swift)
@@ -663,6 +757,7 @@ struct MapHomeView: View {
         DiagLog.add("[Done] step completed: name=\(name), state→on, will stop VPN")
         if !name.isEmpty {
             spoofingState = .on(name: name)
+            SpoofTimer.start(placeName: name)
             // 镜头移到伪装位置,用户直观看到"已生效"
             if let target = spoofedDisplayCoord {
                 lastKnownUserCoord = target  // 让"回到我的位置"按钮跳到伪装坐标
@@ -685,6 +780,7 @@ struct MapHomeView: View {
     private func completeDisable() {
         showRestartPhoneGuide = false
         spoofingState = .off
+        SpoofTimer.stop()
         VPNKeepAlive.update(wanted: CacheShield.isEnabled)
     }
 

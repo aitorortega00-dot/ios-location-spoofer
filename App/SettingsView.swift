@@ -8,6 +8,9 @@ struct SettingsView: View {
     @ObservedObject private var diagLog = DiagLog.shared
     @State private var shieldOn = CacheShield.isEnabled
     @State private var autoReconnectOn = VPNKeepAlive.isEnabled
+    @State private var clipboardOn = ClipboardCoords.isEnabled
+    @State private var timerMinutes = SpoofTimer.minutes
+    @State private var timerNotifyOn = SpoofTimer.notifyEnabled
 
     var body: some View {
         NavigationView {
@@ -53,6 +56,26 @@ struct SettingsView: View {
                     Text("Wi-Fi cache")
                 } footer: {
                     Text("Keeps the VPN on while spoofing is off and blocks Apple's Wi-Fi location lookups, so iOS stops caching your real Wi-Fi positions (the cause of the big grey circle pulling you home). Your real location still works through GPS and cell towers, a bit less precisely indoors. Turn off to get the old behaviour (VPN fully off).\n\nAuto-reconnect: if iOS stops the VPN (screen locked for a long time, reboot), it starts again by itself with the same location, without opening the app. When you open the app it also checks the spoof is still on and repairs it.")
+                }
+
+                Section {
+                    Toggle("Set location from clipboard", isOn: $clipboardOn)
+                        .onChange(of: clipboardOn) { on in
+                            ClipboardCoords.isEnabled = on
+                            DiagLog.add("[clipboard] Settings toggle → \(on ? "on" : "off")")
+                        }
+                    Picker("Wait countdown", selection: $timerMinutes) {
+                        ForEach(SpoofTimer.minuteChoices, id: \.self) { m in
+                            Text("\(m) min").tag(m)
+                        }
+                    }
+                    .onChange(of: timerMinutes) { m in SpoofTimer.minutes = m }
+                    Toggle("Notify when the countdown ends", isOn: $timerNotifyOn)
+                        .onChange(of: timerNotifyOn) { on in SpoofTimer.notifyEnabled = on }
+                } header: {
+                    Text("Shortcuts")
+                } footer: {
+                    Text("Clipboard: copy coordinates or a Google/Apple Maps link in any app, open Location Spoofer and the location is set by itself. To stop iOS asking \"Allow Paste\" every time: iPhone Settings › Location Spoofer › Paste from Other Apps › Allow.\n\nCountdown: starts every time a location is applied, so you know how long to wait before slower apps show it.")
                 }
 
                 // 诊断信息
