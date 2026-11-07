@@ -31,7 +31,7 @@ enum CertCheck {
         let fingerprint = digest.prefix(6).joined(separator: " ")
 
         var trust: SecTrust?
-        guard SecTrustCreateWithObjects(cert, SecPolicyCreateBasicX509(), &trust) == errSecSuccess,
+        guard SecTrustCreateWithCertificates(cert, SecPolicyCreateBasicX509(), &trust) == errSecSuccess,
               let trust else {
             return "SHA-256 \(fingerprint)…, trust check failed to run"
         }
