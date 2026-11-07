@@ -227,6 +227,7 @@ struct SettingsView: View {
         Build: \(buildNumber)
         VPN status: \(vpnStatusText)
         Certificate status: \(certificateStatusText)
+        CA check: \(CertCheck.report())
         Current spoofed location: \(currentLocationText)
         Current coordinates: \(currentCoordinatesText)
         Initial setup: \(setupCompletedText)
