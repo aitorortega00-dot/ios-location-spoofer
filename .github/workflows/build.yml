@@ -30,6 +30,8 @@ jobs:
       - name: Regenerar proyecto con xcodegen
         run: |
           brew install xcodegen
+          # Build number shown in the app = GitHub Actions build number
+          sed -i '' 's/CURRENT_PROJECT_VERSION: "1"/CURRENT_PROJECT_VERSION: "${{ github.run_number }}"/' project.yml
           xcodegen generate
 
       - name: Quitar AppIcon.icon (falla en CI)

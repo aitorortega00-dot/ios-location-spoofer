@@ -105,7 +105,10 @@ struct SettingsView: View {
                         .foregroundColor(.red)
                         .disabled(diagLog.entries.isEmpty)
                 }) {
-                    Button(action: { queryGoLogsViaIPC() }) {
+                    Button(action: {
+                        DiagLog.add("[cert] CA check: \(CertCheck.report())")
+                        queryGoLogsViaIPC()
+                    }) {
                         HStack {
                             Image(systemName: "arrow.down.doc")
                             Text("Fetch Go Proxy Logs (IPC)")
