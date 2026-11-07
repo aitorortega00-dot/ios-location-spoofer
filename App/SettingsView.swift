@@ -254,7 +254,8 @@ struct SettingsView: View {
             try session.sendProviderMessage(request) { response in
                 DispatchQueue.main.async {
                     guard let data = response, !data.isEmpty else {
-                        DiagLog.add("[Go Logs] fetch returned empty (no new Go logs or tunnel not ready)")
+                        DiagLog.add("[Go Logs] fetch returned empty (no IPC reply), reading the tunnel's shared copy")
+                        showSharedTunnelLog()
                         return
                     }
                     guard let text = String(data: data, encoding: .utf8) else {
@@ -271,6 +272,18 @@ struct SettingsView: View {
         } catch {
             DiagLog.add("[Go Logs] sendProviderMessage error: \(error.localizedDescription)")
         }
+    }
+
+    /// Tunnel state and log lines left in the shared app group (no IPC needed).
+    private func showSharedTunnelLog() {
+        if let status = TunnelSharedStatus.read() {
+            DiagLog.add("[Go] \(status.summary)")
+        } else {
+            DiagLog.add("[Go] no shared tunnel status (tunnel from an older build, or never started)")
+        }
+        let lines = TunnelSharedStatus.recentLog()
+        DiagLog.add("[Go Logs] shared copy: \(lines.count) entries")
+        for line in lines { DiagLog.add("[Go] \(line)") }
     }
 
     // MARK: - 重置 App

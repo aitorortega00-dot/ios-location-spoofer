@@ -70,13 +70,17 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         os_log("Go proxy started successfully", log: OSLog.default, type: .info)
         os_log("SPOOFTRACE started lat=%{public}f lon=%{public}f mode=%{public}@", log: OSLog.default, type: .default, lat ?? 0, lon ?? 0, (lat != nil && lon != nil) ? "SPOOFING" : "TRANSPARENT")
         recordEvent("tunnel started (\((lat != nil && lon != nil) ? "spoofing" : "shield"))")
+        observeCoordsNotification()
+        sharedQueue.async { [weak self] in
+            self?.writeSharedStatus(newLines: ["[shared] tunnel started, coords \(lat.map { String(format: "%.6f", $0) } ?? "none"), \(lon.map { String(format: "%.6f", $0) } ?? "none")"])
+        }
         startLogPump()
         startTunnelWithProxy(completionHandler: completionHandler)
     }
 
     private func startLogPump() {
         logTimer?.cancel()
-        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global())
+        let t = DispatchSource.makeTimerSource(queue: sharedQueue)
         t.schedule(deadline: .now() + 1, repeating: 2)
         t.setEventHandler { [weak self] in
             let running = (self?.goLocationSpoofer?.isRunning() ?? false) ? 1 : 0
@@ -89,6 +93,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                     os_log("SPOOFTRACE go: %{public}@", log: OSLog.default, type: .default, line)
                 }
                 self?.keepRecent(lines)
+                self?.writeSharedStatus(newLines: lines)
+            } else {
+                self?.writeSharedStatus(newLines: [])
             }
         }
         t.resume()
@@ -161,6 +168,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     ) {
         os_log("Tunnel stopping, reason: %ld", log: OSLog.default, type: .info, reason.rawValue)
         recordEvent("tunnel stopped (reason \(reason.rawValue))")
+        stopObservingCoordsNotification()
 
         if let proxy = goLocationSpoofer {
             if proxy.stopProxy() {
@@ -178,6 +186,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let handler = completionHandler else { return }
         let cmd = String(data: messageData, encoding: .utf8) ?? ""
         appMessages += 1
+        let msgCount = appMessages
+        sharedQueue.async { [weak self] in
+            self?.writeSharedStatus(newLines: ["[shared] app message #\(msgCount) \(String(cmd.prefix(12)))"])
+        }
         os_log("SPOOFTRACE app message #%{public}d %{public}@", log: OSLog.default, type: .default, appMessages, String(cmd.prefix(12)))
         switch cmd {
         case "getCoords":
@@ -225,6 +237,84 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // 未知命令保持原 echo 行为,兼容潜在旧调用方
             handler(messageData)
         }
+    }
+
+    // MARK: - Shared status (works even when app messages get no reply)
+    //
+    // On some days the app's messages to the tunnel come back empty although the tunnel
+    // is up. The tunnel therefore also leaves its state and recent log lines in the
+    // shared app group, and listens for a Darwin notification to switch coordinates.
+
+    private let sharedQueue = DispatchQueue(label: "tunnel.shared-status")
+    private var sharedLog: [String] = []
+    private var observingCoords = false
+    private static let statusKey = "tunnelSharedStatus"
+    private static let sharedLogKey = "tunnelSharedLog"
+    private static let pendingCoordsKey = "pendingCoords"
+    private static let pendingAckKey = "pendingCoordsAck"
+    private static let coordsNotification = "dev.duti.location-spoofer.setCoords"
+
+    /// Call on sharedQueue.
+    private func writeSharedStatus(newLines: [String]) {
+        guard let d = UserDefaults(suiteName: Self.groupSuite) else { return }
+        if !newLines.isEmpty {
+            let stamp = Self.timeFormatter.string(from: Date())
+            sharedLog.append(contentsOf: newLines.map { "\(stamp) \($0)" })
+            if sharedLog.count > 150 { sharedLog.removeFirst(sharedLog.count - 150) }
+            d.set(sharedLog, forKey: Self.sharedLogKey)
+        }
+        var status: [String: Any] = [
+            "t": Date().timeIntervalSince1970,
+            "up": Int(Date().timeIntervalSince(startedAt)),
+            "running": goLocationSpoofer?.isRunning() == true,
+            "appMessages": appMessages,
+        ]
+        if let c = goLocationSpoofer?.getCurrentCoords() {
+            status["lat"] = c.lat
+            status["lon"] = c.lon
+            status["enabled"] = c.enabled
+        }
+        d.set(status, forKey: Self.statusKey)
+        d.synchronize()
+    }
+
+    private func observeCoordsNotification() {
+        guard !observingCoords else { return }
+        observingCoords = true
+        let me = Unmanaged.passUnretained(self).toOpaque()
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(), me,
+            { _, observer, _, _, _ in
+                guard let observer = observer else { return }
+                let provider = Unmanaged<PacketTunnelProvider>.fromOpaque(observer).takeUnretainedValue()
+                provider.sharedQueue.async { provider.applyPendingCoords() }
+            },
+            Self.coordsNotification as CFString, nil, .deliverImmediately)
+    }
+
+    private func stopObservingCoordsNotification() {
+        guard observingCoords else { return }
+        observingCoords = false
+        CFNotificationCenterRemoveObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(), Unmanaged.passUnretained(self).toOpaque(),
+            CFNotificationName(Self.coordsNotification as CFString), nil)
+    }
+
+    /// Request format: "<id>|<1|0>|<lat>|<lon>". Reply in pendingCoordsAck: "<id>|OK" or "<id>|ERR".
+    private func applyPendingCoords() {
+        guard let d = UserDefaults(suiteName: Self.groupSuite) else { return }
+        d.synchronize()
+        guard let req = d.string(forKey: Self.pendingCoordsKey) else { return }
+        let parts = req.split(separator: "|").map(String.init)
+        guard parts.count == 4, let lat = Double(parts[2]), let lon = Double(parts[3]) else {
+            writeSharedStatus(newLines: ["[shared] bad coordinate request"])
+            return
+        }
+        let enabled = parts[1] == "1"
+        let ok = goLocationSpoofer?.setCoords(lat: lat, lon: lon, enabled: enabled) ?? false
+        os_log("SPOOFTRACE shared setCoords enabled=%{public}d ok=%{public}d", log: OSLog.default, type: .default, enabled ? 1 : 0, ok ? 1 : 0)
+        d.set("\(parts[0])|\(ok ? "OK" : "ERR")", forKey: Self.pendingAckKey)
+        writeSharedStatus(newLines: ["[shared] setCoords enabled=\(enabled) \(String(format: "%.6f, %.6f", lat, lon)) → \(ok ? "OK" : "proxy not running")"])
     }
 
     // MARK: - Sleep / wake records

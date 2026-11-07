@@ -36,7 +36,12 @@ enum CacheShield {
             // No answer: the app may hold an outdated VPN handle. Reload it and try once more
             // before the caller falls back to restarting the VPN (which leaves a short gap).
             VPNKeepAlive.refreshManager(reason: "setCoords") {
-                sendSetCoordsOnce(lat: lat, lon: lon, enabled: enabled, completion: completion)
+                sendSetCoordsOnce(lat: lat, lon: lon, enabled: enabled) { ok in
+                    if ok { completion(true); return }
+                    // Still no reply: try the shared app-group channel before restarting the VPN.
+                    guard ContentView.vpnManager?.connection.status == .connected else { completion(false); return }
+                    TunnelSharedStatus.setCoords(lat: lat, lon: lon, enabled: enabled, completion: completion)
+                }
             }
         }
     }

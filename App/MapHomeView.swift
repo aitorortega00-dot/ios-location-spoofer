@@ -351,6 +351,14 @@ struct MapHomeView: View {
             // back to the app the VPN may take a moment to answer: no answer is not a failure.
             queryGoCoordsWithRetry(tries: 4) { r in
                 guard let r else {
+                    if let shared = TunnelSharedStatus.read(), shared.age < 6 {
+                        DiagLog.add("[resume] (\(reason)) no IPC reply; \(shared.summary)")
+                        if TunnelSharedStatus.confirms(lat: c.latitude, lon: c.longitude) {
+                            if case .on = spoofingState {} else { spoofingState = .on(name: name) }
+                            VPNKeepAlive.update(wanted: true)
+                            return
+                        }
+                    }
                     if attempt == 0 {
                         DiagLog.add("[resume] (\(reason)) VPN connected but not answering, reloading the VPN handle and checking again")
                         VPNKeepAlive.refreshManager(reason: "resume") {
@@ -795,7 +803,7 @@ struct MapHomeView: View {
         showRestartLocationGuide = false
         // pending → on
         let name = UserDefaults.standard.string(forKey: "currentLocationName") ?? ""
-        DiagLog.add("[Done] step completed: name=\(name), state→on, will stop VPN")
+        DiagLog.add("[Done] step completed: name=\(name), state→on, VPN stays on")
         if !name.isEmpty {
             spoofingState = .on(name: name)
             SpoofTimer.start(placeName: name)
@@ -1256,6 +1264,12 @@ struct MapHomeView: View {
                     }
                     DiagLog.add("[confirm] Attempt \(myAttempt) mismatch Go=(\(String(format: "%.6f", r.lat)), \(String(format: "%.6f", r.lon))) dLat=\(String(format: "%.6f", dLat)) dLon=\(String(format: "%.6f", dLon)), retry in 0.15s")
                 } else {
+                    if TunnelSharedStatus.confirms(lat: expectedLat, lon: expectedLon) {
+                        let elapsed = Date().timeIntervalSince(started)
+                        DiagLog.add("[confirm] Attempt \(myAttempt) no IPC reply, but the tunnel's shared status has the new coords (\(String(format: "%.2f", elapsed))s)")
+                        completion(true)
+                        return
+                    }
                     DiagLog.add("[confirm] Attempt \(myAttempt) IPC failed, retry in 0.15s")
                 }
                 if Date() < deadline {
